@@ -7,8 +7,12 @@ const server = serve(0);
 await new Promise(resolve => server.once('listening', resolve));
 const url = `http://127.0.0.1:${server.address().port}`;
 const localChrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const browser = await chromium.launch({ headless: true, ...(existsSync(localChrome) ? { executablePath: localChrome } : {}) });
+let browser;
 try {
+  browser = await chromium.launch({ headless: true, ...(existsSync(localChrome) ? { executablePath: localChrome } : {}) });
+  for (const path of ['/artifacts/crowdcast-trace.json', '/.env', '/package.json', '/%2eenv']) {
+    assert.equal((await fetch(`${url}${path}`)).status, 403, `Private path served: ${path}`);
+  }
   const page = await browser.newPage();
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   await page.goto(url); await page.waitForFunction(() => window.recorder);
@@ -25,6 +29,18 @@ try {
   rows = await page.evaluate(() => batches.flatMap(b => b.records));
   assert.equal(rows.filter(r => r.kind.startsWith('key')).length, before);
   assert.ok(!JSON.stringify(rows).includes('not-recorded'));
+  await page.evaluate(() => {
+    const host = document.createElement('div'); document.body.append(host);
+    host.attachShadow({ mode: 'open' }).innerHTML = '<input type="password">';
+    host.shadowRoot.querySelector('input').focus();
+  });
+  await page.keyboard.type('private');
+  const movesBefore = rows.filter(r => r.kind === 'pointermove').length;
+  await page.mouse.move(300, 100, { steps: 10 });
+  await page.evaluate(() => recorder.flush());
+  rows = await page.evaluate(() => batches.flatMap(b => b.records));
+  assert.equal(rows.filter(r => r.kind.startsWith('key')).length, before);
+  assert.equal(rows.filter(r => r.kind === 'pointermove').length, movesBefore);
   assert.deepEqual(errors, []);
 
   // Real PostHog SDK, network intercepted locally: verify serialization and session enrichment.
@@ -53,8 +69,47 @@ try {
   const body = decoded.find(s => s.includes('behavioral_burst'));
   if (!body) console.error(JSON.stringify({ requests: requests.map(s => s?.slice(0, 140)), stats: await page.evaluate(() => posthogBehavioral.getStats()), errors }));
   assert.ok(body, 'Real SDK did not submit behavioral_burst');
-  assert.ok(body.includes('keydown') && body.includes('keyup') && body.includes('$session_id'));
+  const events = decoded.filter(Boolean).flatMap(s => JSON.parse(s));
+  const bursts = events.filter(e => e.event === 'behavioral_burst').map(e => e.properties);
+  const sdkIdentity = await page.evaluate(() => ({ session: posthog.get_session_id(), person: posthog.get_distinct_id() }));
+  assert.ok(bursts.every(b => b.$session_id === sdkIdentity.session && b.distinct_id === sdkIdentity.person));
+  assert.ok(bursts.every(b => b.schema_version === '1.0' && typeof b.time_origin_ms === 'number'));
+  assert.deepEqual(bursts.flatMap(b => b.records).filter(r => r.kind.startsWith('key')).map(r => [r.kind, r.code]),
+    [['keydown', 'KeyA'], ['keyup', 'KeyA'], ['keydown', 'KeyB'], ['keyup', 'KeyB']]);
   assert.deepEqual(errors, []);
+
+  // Exercise the actual DOM listener at synthetic 120/1000/8000 Hz timestamps.
+  // CPU time here is a dispatch stress test, never a hardware sampling claim.
+  await page.goto(url); await page.waitForFunction(() => window.recorder);
+  const stress = await page.evaluate(async () => {
+    recorder.stop();
+    const { createRecorder } = await import('/src/index.js');
+    const results = [];
+    for (const hz of [120, 1000, 8000]) {
+      let count = 0, mismatches = 0, bytes = 0;
+      const sink = { capture(name, b) {
+        bytes += new TextEncoder().encode(JSON.stringify(b)).length;
+        for (const r of b.records) {
+          if (r.kind !== 'pointermove' || r.t !== count * 1000 / hz || r.x !== count) mismatches++;
+          count++;
+        }
+      } };
+      const r = createRecorder(sink, { allowSynthetic: true, movementSource: 'pointermove' });
+      const start = performance.now(), input = document.querySelector('#typing');
+      for (let i = 0; i < hz * 10; i++) {
+        const event = new PointerEvent('pointermove', { bubbles: true, clientX: i, pointerId: 1 });
+        Object.defineProperty(event, 'timeStamp', { value: i * 1000 / hz });
+        input.dispatchEvent(event);
+      }
+      r.stop();
+      results.push({ hz, count, mismatches, bytes, elapsedMs: performance.now() - start, dropped: r.getStats().dropped });
+    }
+    return results;
+  });
+  for (const result of stress) {
+    assert.equal(result.count, result.hz * 10); assert.equal(result.mismatches, 0); assert.equal(result.dropped, 0);
+  }
+  console.log(JSON.stringify({ syntheticDispatchStress: stress }));
   if (process.env.CROWDCAST_FIXTURE) {
     const trace = JSON.parse(await readFile(process.env.CROWDCAST_FIXTURE, 'utf8'));
     await page.goto(url); await page.waitForFunction(() => window.recorder);
@@ -80,5 +135,6 @@ try {
     assert.equal(result.stats.dropped, 0);
     console.log(JSON.stringify({ crowdcast: 'passed', clock: trace.clock, preservedEvents: expected.length, syntheticFixture: true }));
   }
-  console.log(JSON.stringify({ browser: await browser.version(), checks: 'trusted input, pointer down/up, password exclusion, real PostHog SDK serialization, script-tag auto-start', status: 'passed' }));
-} finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
+  assert.deepEqual(errors, []);
+  console.log(JSON.stringify({ browser: await browser.version(), checks: 'trusted input, pointer down/up, shadow password exclusion, real PostHog SDK payload and identity, script-tag auto-start, private fixture isolation', status: 'passed' }));
+} finally { await browser?.close(); await new Promise(resolve => server.close(resolve)); }

@@ -2,7 +2,9 @@ export const SCHEMA_VERSION = '1.0';
 export const EVENT_NAME = 'behavioral_burst';
 const PRIVATE = 'input[type="password"],[data-ph-behavior-ignore],[data-private],.ph-no-capture,.ph-sensitive';
 const instances = new WeakMap();
-const bytes = value => new TextEncoder().encode(JSON.stringify(value)).length;
+const encoder = new TextEncoder();
+const bytes = value => encoder.encode(JSON.stringify(value)).length;
+const sameIdentity = (a, b) => a && b && a[0] === b[0] && a[1] === b[1];
 const finite = (n, fallback = 0) => Number.isFinite(n) ? n : fallback;
 
 /** Capture actual browser samples only. No polling, interpolation or predicted events. */
@@ -38,32 +40,34 @@ export function createRecorder(posthog, options = {}) {
   const targets = new WeakMap();
   let nextTarget = 1, records = [], recordBytes = 0, identity = null;
   let burst = 0, chunk = 0, sequence = 0, lastT = null, idleTimer, flushTimer;
-  let stopped = false, paused = false;
+  let stopped = false, paused = false, pendingBoundary = null;
 
   function permitted() {
     try { return !paused && config.isAllowed() && posthog.has_opted_out_capturing?.() !== true; }
     catch { return false; }
   }
   function currentIdentity() {
-    return [posthog.get_session_id?.() ?? null, posthog.get_distinct_id?.() ?? null];
+    try { return [posthog.get_session_id?.() ?? null, posthog.get_distinct_id?.() ?? null]; }
+    catch { stats.errors++; return null; }
   }
   function clearTimers() {
     win.clearTimeout(idleTimer); win.clearTimeout(flushTimer);
     idleTimer = flushTimer = undefined;
   }
   function discard() {
+    if (stats.recorded) pendingBoundary = 'capture-gap';
     stats.dropped += records.length;
     records = []; recordBytes = 0; lastT = null; chunk = 0;
     clearTimers();
   }
   function flush(reason = 'manual') {
     if (!records.length) return;
-    if (!permitted() || JSON.stringify(currentIdentity()) !== JSON.stringify(identity)) { discard(); return; }
+    if (!permitted() || !sameIdentity(currentIdentity(), identity)) { discard(); return; }
     const batch = {
       schema_version: SCHEMA_VERSION, recorder_id: id, burst_id: `${id}:${burst}`,
       chunk_index: chunk++, batch_sequence: sequence++, reason,
       time_origin_ms: origin, start_ms: Math.min(...records.map(e => e.t)), end_ms: Math.max(...records.map(e => e.t)),
-      $session_id: identity[0],
+      ...(identity[0] !== null ? { $session_id: identity[0] } : {}),
       viewport: { width: win.innerWidth, height: win.innerHeight, dpr: win.devicePixelRatio, scroll_x: win.scrollX, scroll_y: win.scrollY },
       capture: { movement_source: source, coalesced_supported: typeof win.PointerEvent?.prototype.getCoalescedEvents === 'function', keyboard: config.keyboard, target_hz: 120, synthetic_allowed: config.allowSynthetic },
       records,
@@ -76,22 +80,30 @@ export function createRecorder(posthog, options = {}) {
       // Calling capture hands delivery/retries to the existing SDK; it is not a server ACK.
       posthog.capture(EVENT_NAME, batch, reason === 'hidden' || reason === 'pagehide' ? { transport: 'sendBeacon', send_instantly: true } : undefined);
       stats.submitted += count; stats.batches++;
-    } catch { stats.dropped += count; stats.errors++; }
+    } catch { stats.dropped += count; stats.errors++; pendingBoundary = 'capture-gap'; }
   }
   function push(record) {
     if (stopped) return;
     if (!permitted()) { discard(); return; }
     const nextIdentity = currentIdentity();
-    const changed = identity && JSON.stringify(identity) !== JSON.stringify(nextIdentity);
+    if (!nextIdentity) { discard(); return; }
+    const changed = identity && !sameIdentity(identity, nextIdentity);
     if (changed) discard();
     identity = nextIdentity;
-    if (changed) push({ kind: 'boundary', t: record.t, reason: 'identity' });
+    if (changed) pendingBoundary = 'identity';
+    if (pendingBoundary) {
+      const reason = pendingBoundary; pendingBoundary = null;
+      append({ kind: 'boundary', t: record.t, reason });
+    }
+    append(record);
+  }
+  function append(record) {
     if (lastT === null || record.t - lastT > config.idleMs) {
       flush('idle'); burst++; chunk = 0;
     }
-    lastT = record.t;
+    lastT = Math.max(lastT ?? record.t, record.t);
     const size = bytes(record) + 1;
-    if (size > config.maxBytes - 2048) { stats.dropped++; return; }
+    if (size > config.maxBytes - 2048) { stats.dropped++; pendingBoundary = 'capture-gap'; return; }
     if (records.length >= config.maxEvents || recordBytes + size > config.maxBytes - 2048) flush('limit');
     records.push(record); recordBytes += size; stats.recorded++;
     if (flushTimer === undefined) flushTimer = win.setTimeout(() => flush('interval'), config.flushMs);
@@ -105,7 +117,9 @@ export function createRecorder(posthog, options = {}) {
   }
   function privateTarget(e) {
     const path = e.composedPath?.() ?? [e.target];
-    return [...path, doc.activeElement].some(node => node?.matches?.(excluded) || node?.closest?.(excluded));
+    const focused = [];
+    for (let node = doc.activeElement; node; node = node.shadowRoot?.activeElement) focused.push(node);
+    return [...path, ...focused].some(node => node?.matches?.(excluded) || node?.closest?.(excluded));
   }
   function targetId(e) {
     const node = e.composedPath?.()[0] ?? e.target;
@@ -139,7 +153,11 @@ export function createRecorder(posthog, options = {}) {
       try {
         if (stopped) return;
         if (filter && (!config.allowSynthetic && !e.isTrusted)) return;
-        if (filter && privateTarget(e)) { stats.excluded++; return; }
+        if (filter && privateTarget(e)) {
+          stats.excluded++;
+          if (stats.recorded) pendingBoundary = 'excluded';
+          return;
+        }
         fn(e);
       } catch { stats.errors++; }
     };

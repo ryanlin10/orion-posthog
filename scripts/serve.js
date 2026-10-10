@@ -1,12 +1,16 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { resolve, extname, sep } from 'node:path';
+import { extname } from 'node:path';
+const publicFiles = new Set([
+  '/examples/index.html', '/examples/sdk-test.html', '/src/index.js', '/src/analysis.js',
+  '/dist/recorder.js', '/dist/recorder.js.map', '/node_modules/posthog-js/dist/array.js',
+]);
 export function serve(port = 4173) {
-  const root = resolve('.');
   return createServer(async (req, res) => {
-    const path = resolve(root, '.' + new URL(req.url, 'http://localhost').pathname.replace(/^\/$/, '/examples/index.html'));
-    if (!path.startsWith(root + sep)) { res.writeHead(403).end(); return; }
-    try { const data = await readFile(path); res.setHeader('Content-Type', ({ '.js': 'text/javascript', '.html': 'text/html', '.json': 'application/json' })[extname(path)] ?? 'text/plain'); res.end(data); }
+    const path = new URL(req.url, 'http://localhost').pathname.replace(/^\/$/, '/examples/index.html');
+    // Never serve private CrowdCast fixtures, credentials or arbitrary repo files.
+    if (!publicFiles.has(path)) { res.writeHead(403).end(); return; }
+    try { const data = await readFile(new URL(`..${path}`, import.meta.url)); res.setHeader('Content-Type', ({ '.js': 'text/javascript', '.html': 'text/html' })[extname(path)] ?? 'text/plain'); res.end(data); }
     catch { res.writeHead(404).end(); }
   }).listen(port, '127.0.0.1');
 }

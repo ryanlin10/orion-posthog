@@ -14,7 +14,7 @@ This is a custom analytics-event format, not a PostHog snapshot/rrweb format.
 | `reason` | string | idle, interval, limit, manual, blur, hidden, pagehide, stop, resume, or caller-provided flush reason |
 | `time_origin_ms` | number | Browser performance time origin in epoch milliseconds |
 | `start_ms`, `end_ms` | number | Min/max relative sample timestamps in this chunk |
-| `$session_id` | string/null | SDK session at collection time; SDK supplies its other normal identity properties |
+| `$session_id` | optional string | SDK session at collection time, omitted if unavailable; SDK supplies its other normal identity properties |
 | `viewport` | object | Width, height, device-pixel ratio, and page scroll position **at chunk flush** |
 | `capture` | object | Selected movement source, coalescing capability, keyboard mode, target Hz (120), synthetic-event setting |
 | `records` | array | Actual samples in capture order |
@@ -46,9 +46,11 @@ Movement also includes `coalesced` indicating whether the record came from a non
 - `wheel`: `dx/dy/dz` and `mode` copied from deltaX/Y/Z and deltaMode. Units depend on mode (pixels, lines, pages).
 - `scroll`: target scroll `x/y`; document events use window scroll coordinates.
 - `resize`: current `width/height/dpr`.
-- `boundary`: `reason` is blur, hidden, pagehide, identity, or resume. A held input might never deliver its release after this boundary.
+- `boundary`: `reason` is blur, hidden, pagehide, identity, resume, excluded, or capture-gap. A held input might never deliver its release after this boundary. Consumers should treat any boundary reason, including future values, as a break in continuity.
 
 Session/person changes discard buffered old-identity input, then insert an identity boundary before new input. Pause discards pending data; resume inserts a boundary. Errors/dropped counts are available locally through `getStats()`; they are not proof that PostHog ingested all other records.
+
+After excluded input or an observed permission/SDK failure, a boundary is inserted immediately before the next permitted record, with that record's timestamp. This marks a gap, not the precise time or duration of the excluded activity. Nothing is sent merely because a private field is used. Focus inside open shadow roots is checked recursively; closed shadow roots require an excluded host. Applications must call `pause()` on consent revocation to notify the recorder even when no input or flush occurs during the interruption.
 
 ## Integrity checks
 

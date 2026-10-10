@@ -1,13 +1,25 @@
 {
   "name": "posthog-behavioral-recorder",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "High-resolution keyboard and pointer bursts alongside the PostHog browser SDK",
   "type": "module",
   "license": "MIT",
   "main": "./src/index.js",
   "types": "./src/index.d.ts",
-  "exports": { ".": { "types": "./src/index.d.ts", "import": "./src/index.js" }, "./analysis": "./src/analysis.js" },
-  "files": ["src", "dist", "LICENSE", "README.md", "docs"],
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    },
+    "./analysis": "./src/analysis.js"
+  },
+  "files": [
+    "src",
+    "dist",
+    "LICENSE",
+    "README.md",
+    "docs"
+  ],
   "scripts": {
     "build": "node scripts/build.js",
     "test": "node --test test/*.test.js",
@@ -16,7 +28,16 @@
     "demo": "node scripts/serve.js",
     "prepack": "npm run build"
   },
-  "devDependencies": { "esbuild": "0.25.12", "playwright": "1.56.1", "posthog-js": "1.280.0" },
-  "repository": { "type": "git", "url": "https://github.com/ryanlin10/posthog-behavioral-recorder.git" },
-  "engines": { "node": ">=22" }
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "playwright": "1.56.1",
+    "posthog-js": "1.280.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ryanlin10/posthog-behavioral-recorder.git"
+  },
+  "engines": {
+    "node": ">=22"
+  }
 }

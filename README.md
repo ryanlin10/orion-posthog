@@ -14,7 +14,7 @@ These are **custom analytics events**. They do not add native rrweb input events
 
 ## Add one script
 
-Download `recorder.js` from the [v0.1.0 release](https://github.com/ryanlin10/posthog-behavioral-recorder/releases/tag/v0.1.0), serve it from your site, and place this after your normal PostHog initialization:
+Download `recorder.js` from the [v0.1.1 release](https://github.com/ryanlin10/posthog-behavioral-recorder/releases/tag/v0.1.1), serve it from your site, and place this after your normal PostHog initialization:
 
 ```html
 <script defer src="/vendor/recorder.js"></script>
@@ -43,7 +43,7 @@ The existing SDK's `has_opted_out_capturing()` is also checked before collecting
 The package is available from this repository; it is **not published to npm** by this release.
 
 ```sh
-npm install github:ryanlin10/posthog-behavioral-recorder#v0.1.0
+npm install github:ryanlin10/posthog-behavioral-recorder#v0.1.1
 ```
 
 ```js
@@ -89,7 +89,9 @@ const result = analyzeBatches(exportedEvents.map(event => event.properties));
 console.log(result.keyHoldMs, result.movement);
 ```
 
-Pass one copy of each batch; the analyzer does not deduplicate ingestion retries. It computes key holds, unmatched releases, and pointer cadence. Movement intervals of 100 ms or longer are excluded from its active-motion cadence statistic; this is a reporting convention, not evidence the user was inactive.
+The analyzer groups and orders batches by recorder ID and sequence, deduplicates retries (first copy wins), and reports `duplicateBatches` and `missingBatches`. Missing batches are detectable only between received sequence numbers; missing prefixes or tails are unknown. Key holds and movement intervals never span a detected gap or a boundary, including exclusions and observed consent interruptions. Duration arithmetic uses relative timestamps to preserve their precision. Results are grouped by recorder rather than globally time-sorted.
+
+It computes key holds, unmatched releases, and pointer cadence. Movement intervals of 100 ms or longer are excluded from its active-motion cadence statistic; this is a reporting convention, not evidence the user was inactive.
 
 High-resolution telemetry is data-heavy. At 120 samples/second, continuous movement produces 432,000 samples/hour; higher rates produce more. Batching reduces event counts, not the amount of source information. Profile payload volume and PostHog billing on your own traffic before broad rollout. SDK-level filters, consent, network failure, and browser termination can still prevent delivery. `submitted` means handed to the SDK, **not acknowledged by PostHog**. No custom disk queue or background retries are added.
 

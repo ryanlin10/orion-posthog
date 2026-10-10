@@ -105,3 +105,63 @@ test('idle timer sends a burst without another event', async t => {
   const e = setup(t, { idleMs: 50 }); e.emit('keydown');
   await new Promise(resolve => setTimeout(resolve, 80)); assert.equal(e.calls.length, 1);
 });
+
+test('SDK identity lookup errors drop buffered input and still allow cleanup', t => {
+  const e = setup(t); e.emit('keydown');
+  e.posthog.get_session_id = () => { throw new Error('SDK unavailable'); };
+  assert.doesNotThrow(() => e.recorder.stop());
+  assert.equal(e.recorder.getStats().stopped, true);
+  assert.equal(e.recorder.getStats().dropped, 1);
+  assert.equal(e.recorder.getStats().errors, 1);
+  const replacement = createRecorder(e.posthog, { window: e.win }); replacement.stop();
+});
+
+test('capture-only clients do not override SDK session enrichment with null', t => {
+  const e = setup(t); delete e.posthog.get_session_id;
+  e.emit('keydown'); e.recorder.flush();
+  assert.equal('$session_id' in e.calls[0][1], false);
+});
+
+test('excluded input breaks key pairing without exposing the excluded events', t => {
+  const e = setup(t);
+  e.emit('keydown', { code: 'KeyA', timeStamp: 1 }); e.recorder.flush();
+  e.doc.activeElement = { shadowRoot: { activeElement: { matches: () => true } } };
+  e.emit('pointermove', { timeStamp: 2 });
+  e.doc.activeElement = null;
+  e.emit('keyup', { code: 'KeyA', timeStamp: 3 }); e.recorder.flush();
+  assert.equal(e.rows().some(r => r.kind === 'pointermove'), false);
+  assert.equal(e.rows().some(r => r.kind === 'boundary' && r.reason === 'excluded'), true);
+  assert.deepEqual(analyzeBatches(e.calls.map(c => c[1])).keyHoldMs, []);
+});
+
+test('opt-out followed by opt-in cannot pair keys across the capture gap', t => {
+  const e = setup(t);
+  e.emit('keydown', { code: 'KeyA', timeStamp: 1 }); e.recorder.flush();
+  e.optOut(true); e.emit('pointermove', { timeStamp: 2 });
+  e.optOut(false); e.emit('keyup', { code: 'KeyA', timeStamp: 3 }); e.recorder.flush();
+  assert.deepEqual(analyzeBatches(e.calls.map(c => c[1])).keyHoldMs, []);
+});
+
+test('SDK identity lookup recovers without retaining input from the failed lookup', t => {
+  const e = setup(t), getter = e.posthog.get_session_id;
+  e.emit('keydown', { code: 'KeyA', timeStamp: 1 }); e.recorder.flush();
+  e.posthog.get_session_id = () => { throw new Error('temporary failure'); };
+  e.emit('pointermove', { timeStamp: 2 });
+  e.posthog.get_session_id = getter;
+  e.emit('keyup', { code: 'KeyA', timeStamp: 3 }); e.recorder.flush();
+  assert.equal(e.rows().some(r => r.kind === 'pointermove'), false);
+  assert.equal(e.recorder.getStats().errors, 1);
+  assert.deepEqual(analyzeBatches(e.calls.map(c => c[1])).keyHoldMs, []);
+});
+
+test('analyzer does not pair across a batch that the SDK failed to accept', t => {
+  const e = setup(t), capture = e.posthog.capture;
+  e.emit('keydown', { code: 'KeyA', timeStamp: 1 }); e.recorder.flush();
+  e.posthog.capture = () => { throw new Error('temporary failure'); };
+  e.emit('pointermove', { timeStamp: 2 }); e.recorder.flush();
+  e.posthog.capture = capture;
+  e.emit('keyup', { code: 'KeyA', timeStamp: 3 }); e.recorder.flush();
+  const result = analyzeBatches(e.calls.map(c => c[1]));
+  assert.equal(result.missingBatches, 1);
+  assert.deepEqual(result.keyHoldMs, []);
+});
