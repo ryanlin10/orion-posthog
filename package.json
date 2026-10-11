@@ -1,6 +1,6 @@
 {
   "name": "posthog-behavioral-recorder",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "High-resolution keyboard and pointer bursts alongside the PostHog browser SDK",
   "type": "module",
   "license": "MIT",
@@ -11,14 +11,23 @@
       "types": "./src/index.d.ts",
       "import": "./src/index.js"
     },
-    "./analysis": "./src/analysis.js"
+    "./analysis": "./src/analysis.js",
+    "./codec": {
+      "types": "./src/codec.d.ts",
+      "import": "./src/codec.js"
+    }
   },
   "files": [
     "src",
     "dist",
     "LICENSE",
     "README.md",
-    "docs"
+    "docs",
+    "pyproject.toml",
+    "recipes",
+    "telemetry_dataset/*.py",
+    "examples/training/*.py",
+    "examples/training/*.json"
   ],
   "scripts": {
     "build": "node scripts/build.js",
@@ -26,12 +35,14 @@
     "test:browser": "node scripts/browser-test.js",
     "check": "npm run build && npm test && npm run test:browser",
     "demo": "node scripts/serve.js",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "test:training": "python3 -m unittest discover -s test/training -v"
   },
   "devDependencies": {
     "esbuild": "0.25.12",
     "playwright": "1.56.1",
-    "posthog-js": "1.280.0"
+    "posthog-js": "1.280.0",
+    "posthog-js-current": "npm:posthog-js@1.438.7"
   },
   "repository": {
     "type": "git",

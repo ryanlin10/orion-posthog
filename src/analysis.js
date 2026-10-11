@@ -1,3 +1,4 @@
+import { decodeRecords } from './codec.js';
 /** Offline analysis of decoded behavioral_burst properties; never an emotion classifier. */
 export function analyzeBatches(batches) {
   // Delivery order can differ from capture order. A recorder UUID owns one sequence.
@@ -25,14 +26,14 @@ export function analyzeBatches(batches) {
       }
       if (previousOrigin !== undefined && batch.time_origin_ms !== previousOrigin) reset();
       previousSequence = sequence; previousOrigin = batch.time_origin_ms;
-      for (const row of batch.records) {
+      for (const row of decodeRecords(batch)) {
         records++;
         counts[row.kind] = (counts[row.kind] ?? 0) + 1;
         if (row.kind === 'boundary') reset();
-        const key = `${row.code}:${row.location}`;
-        if (row.kind === 'keydown' && row.code && !row.repeat) held.set(key, row.t);
-        if (row.kind === 'keyup' && row.code) {
-          const start = held.get(key);
+        const key = row.press_id !== undefined ? `press:${row.press_id}` : row.code ? `${row.code}:${row.location}` : null;
+        if (row.kind === 'keydown' && key !== null && !row.repeat) held.set(key, row.t);
+        if (row.kind === 'keyup') {
+          const start = key !== null ? held.get(key) : undefined;
           if (start !== undefined && row.t >= start) holds.push(row.t - start);
           else unmatchedUps++;
           held.delete(key);

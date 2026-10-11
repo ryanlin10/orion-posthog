@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "human-labeled-sentiment",
+  "targets": {"sentiment": {"type": "categorical", "classes": ["negative", "neutral", "positive"]}},
+  "window": {"mode": "label", "max_duration_ms": 60000},
+  "labels": {"sources": ["human", "self_report"], "min_confidence": 0.7},
+  "quality": {"allow_gaps": false, "allow_synthetic": false},
+  "features": {"families": ["keyboard", "pointer", "scroll"]},
+  "split": {"seed": "sentiment-v1", "fractions": {"train": 0.7, "validation": 0.15, "test": 0.15}},
+  "output": {"include_sequence": false}
+}

@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname } from 'node:path';
 const publicFiles = new Set([
-  '/examples/index.html', '/examples/sdk-test.html', '/src/index.js', '/src/analysis.js',
+  '/examples/index.html', '/examples/sdk-test.html', '/src/index.js', '/src/analysis.js', '/src/codec.js',
   '/dist/recorder.js', '/dist/recorder.js.map', '/node_modules/posthog-js/dist/array.js',
 ]);
 export function serve(port = 4173) {

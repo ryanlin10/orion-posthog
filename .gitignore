@@ -5,3 +5,9 @@ artifacts/
 .DS_Store
 .env*
 .venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+datasets/
+training-output/

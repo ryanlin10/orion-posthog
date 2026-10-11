@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRecorder } from '../src/index.js';
 import { analyzeBatches } from '../src/analysis.js';
+import { webcrypto } from 'node:crypto';
 import { environment } from './helpers.js';
 
 function setup(t, options = {}) {
@@ -86,8 +87,16 @@ test('idle gaps create distinct bursts; max chunk limits do not', t => {
 test('blur marks a boundary without fabricating up events; pagehide uses beacon', t => {
   const e = setup(t); e.emit('keydown'); e.emit('blur', {}, e.win);
   assert.deepEqual(e.rows().map(r => r.kind), ['keydown', 'boundary']);
-  e.emit('pagehide', {}, e.win);
-  assert.deepEqual(e.calls.at(-1)[2], { transport: 'sendBeacon', send_instantly: true });
+  e.emit('keydown'); e.emit('pagehide', {}, e.win);
+  assert.deepEqual(e.calls.at(-1)[2], { skip_client_rate_limiting: true, transport: 'sendBeacon', send_instantly: true });
+});
+test('lifecycle boundaries with nothing buffered ride on the next input instead of a separate event', t => {
+  const e = setup(t); e.emit('keydown', { code: 'KeyA', timeStamp: 1 }); e.recorder.flush();
+  e.emit('blur', {}, e.win); e.emit('pagehide', {}, e.win); e.recorder.pause(); e.recorder.resume();
+  assert.equal(e.calls.length, 1);
+  e.emit('keyup', { code: 'KeyA', timeStamp: 900 }); e.recorder.flush();
+  assert.deepEqual(e.calls[1][1].records.map(r => [r.kind, r.t]), [['boundary', 900], ['keyup', 900]]);
+  assert.deepEqual(analyzeBatches(e.calls.map(c => c[1])).keyHoldMs, []);
 });
 test('stop cleans listeners and timers; duplicate instances rejected', t => {
   const e = setup(t); assert.throws(() => createRecorder(e.posthog, { window: e.win }), /already/);
@@ -164,4 +173,45 @@ test('analyzer does not pair across a batch that the SDK failed to accept', t =>
   const result = analyzeBatches(e.calls.map(c => c[1]));
   assert.equal(result.missingBatches, 1);
   assert.deepEqual(result.keyHoldMs, []);
+});
+
+test('the HTML snippet placeholder is rejected instead of silently queueing forever', () => {
+  const e = environment();
+  assert.throws(() => createRecorder({ ...e.posthog, _i: [] }, { window: e.win }), /snippet placeholder/);
+});
+
+test('batches the SDK refuses are counted as dropped and break continuity', t => {
+  const e = environment(), capture = e.posthog.capture;
+  e.posthog.__loaded = true; // posthog-js reports refusals by returning undefined
+  e.recorder = createRecorder(e.posthog, { window: e.win, allowSynthetic: true }); t.after(() => e.recorder.stop());
+  e.posthog.capture = (...args) => { e.calls.push(structuredClone(args)); return undefined; };
+  e.emit('keydown', { code: 'KeyA', timeStamp: 1 }); e.recorder.flush();
+  assert.deepEqual(e.recorder.getStats(), { ...e.recorder.getStats(), submitted: 0, batches: 0, dropped: 1 });
+  e.posthog.capture = capture;
+  e.emit('keyup', { code: 'KeyA', timeStamp: 3 }); e.recorder.flush();
+  assert.equal(e.calls.at(-1)[1].records[0].reason, 'capture-gap');
+  assert.ok(e.calls.every(c => c[2].skip_client_rate_limiting === true));
+});
+
+test('recorder IDs do not require a secure context', t => {
+  const e = environment(); e.win.crypto = { getRandomValues: a => webcrypto.getRandomValues(a) };
+  const r = createRecorder(e.posthog, { window: e.win, allowSynthetic: true }); t.after(() => r.stop());
+  e.emit('keydown'); r.flush();
+  assert.match(e.calls[0][1].recorder_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+});
+
+test('batches carry a wall-clock anchor for replay alignment', t => {
+  const e = setup(t); e.emit('keydown'); e.recorder.flush();
+  const { clock } = e.calls[0][1];
+  assert.ok(clock.perf_ms <= performance.now());
+  assert.ok(Math.abs(clock.epoch_ms - Date.now()) < 1000);
+});
+
+test('identity and consent are read once per dispatched event, not per coalesced sample', t => {
+  const e = setup(t); let lookups = 0;
+  const getter = e.posthog.get_session_id; e.posthog.get_session_id = () => { lookups++; return getter(); };
+  const samples = Array.from({ length: 8 }, (_, i) => ({ timeStamp: i, clientX: i, pointerId: 1 }));
+  e.emit('pointermove', { timeStamp: 8, getCoalescedEvents: () => samples });
+  assert.equal(e.rows().length + e.recorder.getStats().buffered, 8);
+  assert.equal(lookups, 1);
 });

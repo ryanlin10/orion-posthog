@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "posthog-telemetry-dataset"
+version = "0.2.0"
+description = "Recipe-driven, local telemetry training dataset construction"
+readme = "docs/training.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = []
+
+[project.optional-dependencies]
+training = ["scikit-learn==1.9.1"]
+
+[project.scripts]
+telemetry-dataset = "telemetry_dataset.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["telemetry_dataset*"]

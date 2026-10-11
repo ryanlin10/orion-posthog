@@ -3,7 +3,7 @@ export function environment() {
   const win = new EventTarget();
   const doc = new EventTarget();
   Object.assign(doc, { querySelector: () => null, activeElement: null, hidden: false });
-  Object.assign(win, { document: doc, performance: { timeOrigin: 1700000000000, now: () => 1000 }, crypto: webcrypto,
+  Object.assign(win, { document: doc, performance: { timeOrigin: 1700000000000, now: () => performance.now() }, crypto: webcrypto,
     innerWidth: 1440, innerHeight: 900, devicePixelRatio: 2, scrollX: 0, scrollY: 0,
     setTimeout, clearTimeout, PointerEvent: class {} });
   const calls = [];
