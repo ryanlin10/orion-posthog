@@ -67,7 +67,7 @@ def recipe_config(value):
     if not isinstance(out["output"]["include_sequence"], bool):
         raise ValueError("include_sequence must be boolean")
     f = out["features"]
-    if not isinstance(f["families"], list) or any(not isinstance(x, str) for x in f["families"]) or set(f["families"]) - {"keyboard", "pointer", "scroll", "volume"}:
+    if not isinstance(f["families"], list) or any(not isinstance(x, str) for x in f["families"]) or set(f["families"]) - {"keyboard", "pointer", "scroll", "focus", "volume"}:
         raise ValueError("Invalid feature families")
     if f["hook"] is not None and not isinstance(f["hook"], str):
         raise ValueError("features.hook must be a local Python file")

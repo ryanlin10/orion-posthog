@@ -1,4 +1,7 @@
-# Build training data from telemetry
+# The dataset builder
+
+`orion build` and `orion train` call this builder for you (see the [README](../README.md)). This page documents
+the builder itself, for using it directly with your own labels and recording metadata.
 
 This tool structures recorded behavior and explicit annotations into reproducible datasets. It does not infer training labels from typing speed, equate absent labels with neutral sentiment, or claim that telemetry can predict any particular emotion.
 
@@ -7,12 +10,12 @@ The builder requires Python 3.10+ and uses only the standard library. Run from a
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install .
-# Then use .venv/bin/telemetry-dataset instead of python3 -m telemetry_dataset.
+# Then use .venv/bin/orion-dataset instead of python3 -m paradigm_orion.dataset.
 ```
 
 ## Three inputs and a recipe
 
-1. **Telemetry JSONL:** one `behavioral_burst` properties object or PostHog event envelope per line. Schema 1.0, 1.1 and 1.2 are supported, including columnar records. Other PostHog event names are counted and skipped. Arrays/CSV/rrweb snapshots are not this input format; convert them explicitly first.
+1. **Telemetry JSONL:** one `orion_input` (or older `behavioral_burst`) properties object or PostHog event envelope per line. Schema 1.0 to 1.3 are supported, including columnar records. Other PostHog event names are counted and skipped. Arrays/CSV/rrweb snapshots are not this input format; convert them explicitly first.
 2. **Recording metadata JSONL:** map each recorder to its experimental split group. Use a stable participant ID to evaluate new-person generalization. Never assign each overlapping window its own group.
 3. **Interval annotations JSONL:** explicit target values, evidence source, annotation version, confidence and temporal scope.
 4. **Recipe JSON:** target definitions, windowing, quality policies, feature selection, split assignments and export options.
@@ -32,8 +35,8 @@ Example annotation:
 `source` is `human`, `self_report`, `model`, `heuristic`, or `synthetic`. Model/heuristic labels require explicit recipe opt-in and remain marked as proxies in every output example. `version` identifies the annotation protocol/prompt; `confidence` is supplied by that protocol, not assumed to be a calibrated probability. Label text and rationales are not exported to model features.
 
 ```sh
-python3 -m telemetry_dataset \
-  --recipe recipes/sentiment.json \
+python3 -m paradigm_orion.dataset \
+  --recipe examples/training/recipes/sentiment.json \
   --batches /path/to/events-1.jsonl /path/to/events-2.jsonl \
   --recordings /path/to/recordings.jsonl \
   --labels /path/to/labels.jsonl \
@@ -44,7 +47,7 @@ Output must be a new directory. A failed build publishes no partial dataset. All
 
 ## Customize the recipe
 
-Start with [sentiment.json](../recipes/sentiment.json), [multitask.json](../recipes/multitask.json), or [implicit.json](../recipes/implicit.json). The class names are examples; there is no hard-coded mood taxonomy.
+Start with [sentiment.json](../examples/training/recipes/sentiment.json), [multitask.json](../examples/training/recipes/multitask.json), or [implicit.json](../examples/training/recipes/implicit.json). The class names are examples; there is no hard-coded mood taxonomy.
 
 | Option | Behavior |
 | --- | --- |
@@ -104,7 +107,7 @@ Quality metadata describes known evidence, not proof of complete capture. Missin
 
 ```sh
 python3 examples/training/make_demo.py
-python3 -m telemetry_dataset \
+python3 -m paradigm_orion.dataset \
   --recipe artifacts/training-demo-input/recipe.json \
   --batches artifacts/training-demo-input/batches.jsonl \
   --labels artifacts/training-demo-input/labels.jsonl \
@@ -117,7 +120,7 @@ The demo explicitly opts into synthetic labels and input. Its labels are unrelat
 An optional small-dataset reference trainer accepts its own JSON recipe. It requires Python 3.11+ for the pinned scikit-learn version; use a 3.11+ virtual environment for the following commands:
 
 ```sh
-.venv/bin/python -m pip install '.[training]'
+.venv/bin/python -m pip install .
 .venv/bin/python examples/training/train_classifier.py \
   --dataset artifacts/training-demo-output \
   --recipe examples/training/logistic.json \

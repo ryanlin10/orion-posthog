@@ -1,12 +1,14 @@
-# behavioral_burst v1.2
+# Orion events (input schema 1.3)
 
 This is a custom analytics-event format, not a PostHog snapshot/rrweb format.
 
-`posthog.capture('behavioral_burst', properties)` submits one chunk. A long burst produces multiple chunks; a burst ends after the configured idle gap. The outer PostHog event timestamp is submission time. Use the timestamps below for behavior analysis.
+Orion sends three PostHog events: `orion_session_start` once per page load, `orion_input` with input records, and `orion_label` with live labels (see the end of this page). Earlier releases named the input event `behavioral_burst`; the dataset builder reads both.
+
+`posthog.capture('orion_input', properties)` submits one chunk. A long burst produces multiple chunks; a burst ends after the configured idle gap. The outer PostHog event timestamp is submission time. Use the timestamps below for behavior analysis.
 
 | Property | Type | Meaning |
 | --- | --- | --- |
-| `schema_version` | string | `1.2` (1.1 added `clock`; 1.2 adds quality, press pairing and optional columns) |
+| `schema_version` | string | `1.3` (1.1 added `clock`; 1.2 quality, press pairing and columns; 1.3 focus records, key classes and the Orion event name) |
 | `recorder_id` | UUID string | One running recorder instance in one document |
 | `burst_id` | string | Recorder ID plus monotonic burst number |
 | `batch_sequence` | integer | Chunk sequence across the recorder lifetime, starting at zero |
@@ -17,10 +19,10 @@ This is a custom analytics-event format, not a PostHog snapshot/rrweb format.
 | `clock` | object | `epoch_ms` (`Date.now()`) and `perf_ms` (`performance.now()`), read together at chunk flush |
 | `$session_id` | string | Set by the PostHog SDK at submission (it overwrites any value the recorder supplies). Buffered input is discarded if the session or person changed before submission, so all records in a chunk belong to this session |
 | `viewport` | object | Width, height, device-pixel ratio, and page scroll position **at chunk flush** |
-| `capture` | object | Selected movement source, coalescing capability, keyboard mode, target Hz (120), synthetic-event setting |
+| `capture` | object | Selected movement source, coalescing capability, keyboard mask (`keyboard`), target Hz (120), synthetic-event setting |
 | `quality` | object | `record_count`, cumulative `dropped_before_batch`, `excluded_events_total`, `sdk_refused_batches` at flush |
-| `records` | array | Actual samples in capture order, default format |
-| `record_columns` | object | Optional columnar representation instead of `records` |
+| `record_columns` | object | Samples in capture order, columnar (Orion's default) |
+| `records` | array | The same samples as rows, with `recordFormat: 'rows'` |
 
 All samples have `kind` and `t`; `t` is milliseconds relative to `time_origin_ms`, retaining the precision provided by the browser. `time_origin_ms + t` is absolute time on the browser's monotonic clock, which can drift from wall-clock time (some platforms pause it while the computer sleeps). To align with session replay or other `Date.now()` timestamps, use the chunk's anchor: wall time ≈ `clock.epoch_ms - (clock.perf_ms - t)`. This does not assert hardware-microsecond accuracy. Coalesced event timestamps may precede other recently received event kinds. Preserve source order and stable-sort by time when the analysis requires it.
 
@@ -30,7 +32,9 @@ Ordinary input samples also have `trusted` and `target`. Target is a recorder-lo
 
 `kind`: `keydown` or `keyup`.
 
-Fields: `code`, `location`, and `modifiers` (code mode only), `repeat`, `composing`, and optional `press_id`.
+Fields: `repeat`, `composing`, and `press_id` in every mask; `key_type` with the `types` mask; `code`, `location` and `modifiers` only with the `code` mask, which reveals typed text and is never the default.
+
+`key_type` is one of `letter`, `digit`, `space`, `delete`, `enter`, `modifier`, `navigation` or `other` (punctuation and everything else).
 
 `press_id` is a recorder-local integer unique to each observed non-repeat keydown. Repeats and the matching keyup share it. It does not identify the same physical key across separate presses. Unknown releases omit it; exclusions and continuity gaps clear held presses. This enables overlapping-key hold durations in timing mode without exporting codes or modifier identities.
 
@@ -51,6 +55,7 @@ Movement also includes `coalesced` indicating whether the record came from a non
 - `wheel`: `dx/dy/dz` and `mode` copied from deltaX/Y/Z and deltaMode. Units depend on mode (pixels, lines, pages).
 - `scroll`: target scroll `x/y`; document events use window scroll coordinates.
 - `resize`: current `width/height/dpr`.
+- `focusin`, `focusout`: `field` is a coarse kind (`text`, `number`, `textarea`, `editable`, `select`, `choice`, `button`, `link` or `other`). No names, IDs, selectors or values. Focus on an excluded element is not recorded; it pauses capture.
 - `boundary`: `reason` is blur, hidden, pagehide, identity, resume, excluded, budget, or capture-gap. A held input might never deliver its release after this boundary. Consumers should treat any boundary reason, including future values, as a break in continuity.
 
 Session/person changes discard buffered old-identity input, then insert an identity boundary before new input. Pause discards pending data; resume inserts a boundary. A lifecycle boundary (blur, hidden, pagehide, resume) that occurs while input is buffered is appended with its own timestamp and the chunk is flushed. With nothing buffered, no event is sent: the boundary is held and inserted immediately before the next permitted record, with that record's timestamp. Errors/dropped counts are available locally through `getStats()`; they are not proof that PostHog ingested all other records.
@@ -70,10 +75,33 @@ After excluded input or an observed permission/SDK failure (including a chunk th
 With `recordFormat: 'columns'`, `record_columns` contains `length`, `fields`, and `present`. Every field column has `length` values. Sparse fields have a list of present row indices in `present`; missing slots use null placeholders. A field absent from `present` is present in all rows. This distinguishes an explicit null from a missing property. JSON numeric precision and capture order are preserved; this is not quantization or resampling.
 
 ```js
-import { decodeRecords } from 'posthog-behavioral-recorder/codec';
+import { decodeRecords } from '@paradigmmachines/orion/codec';
 const records = decodeRecords(batch); // accepts rows or columns
 ```
 
 The analyzer and Python training builder accept both formats. Row batches remain the default for existing consumers. Column overhead can outweigh savings for tiny or highly heterogeneous batches.
 
 Quality counters describe recorder-local observations before the current capture attempt. SDK acceptance is not a server acknowledgement. Subsequent batches can reveal earlier failures; missing tails remain unknown. Exclusion counts count filtered dispatched events, not necessarily all underlying coalesced samples. See the [training guide](training.md) for gap handling and annotation alignment.
+
+## orion_session_start
+
+`orion_version`, `schema_version`, `mask`, `pointer_source` and `models` (the model URLs or names given to `connect`).
+
+## orion_label
+
+Sent when a live label changes (after it wins `confirm` consecutive scores, two by default) and every 60 seconds while it holds. The SDK adds `$session_id`, `$pathname` and identity as for any event.
+
+| Property | Meaning |
+| --- | --- |
+| `model`, `model_version` | The deployed model's name and version |
+| `target` | The recipe target, e.g. `sentiment` |
+| `label` | The class, or the score for `score(min, max)` targets |
+| `confidence`, `probabilities` | The model's probability for the label and for every class (null for scores) |
+| `evidence` | Up to two plain-words comparisons of this window with the training data, e.g. "time between clicks lower than usual (250 ms vs 1,500 ms)" |
+| `since` | When the current label started (ISO time) |
+| `earlier` | Earlier labels in this session, oldest first |
+| `agents` | Agents the model was deployed for (`orion deploy --context`) |
+| `window_ms` | Length of the scored window |
+| `changed` | true when the label changed, false for the heartbeat |
+
+Live scoring follows the training rules: a window is scored only if it has at least `min_events` input records and, unless the recipe allowed gaps, no capture gap. Without a score the label stays as it was; consent loss, pause and session or person changes clear it.

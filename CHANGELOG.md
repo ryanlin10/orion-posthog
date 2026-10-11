@@ -1,5 +1,18 @@
 # Changelog
 
+## Orion 0.1.0 (unreleased)
+
+Orion grows out of posthog-behavioral-recorder 0.2.0 (history kept). Package names: `@paradigmmachines/orion` (npm) and `paradigm-orion` (PyPI, `orion` command).
+
+- Browser: `orion.connect(posthog, options)` and `orion.js` (script tag). The default mask is now timing only; `types` adds a key class; `code` stays opt-in. Focus changes are recorded with a coarse field kind. Events are `orion_session_start`, `orion_input` (was `behavioral_burst`, schema 1.3) and `orion_label`. Batches default to columns, every 5 s or 2 s of idle, to cut PostHog event counts.
+- Live labels in the browser: models from `orion deploy` score the latest window every 2 s, with the training builder's window rules, a two-score confirmation before switching, and plain-words evidence. `context()`, `contextText()`, `labels()`, `onLabel()`. Labels clear on consent loss, pause and session changes.
+- Browser features and time steps match the Python builder exactly; exported trees, forests, logistic models and ONNX sequence models give the same outputs in the browser as in scikit-learn and PyTorch.
+- `orion` command: `init`, `pull` (PostHog file download exports, a week at a time), `label text|replay|human`, `build`, `train`, `deploy`, `context`, `search`, `status`. YAML recipes.
+- Labellers: AI on text people wrote (default PostHog `$ai_generation`), AI on replay activity, and a local human labelling page with replay links. Cached AI answers; overlaps resolved human > text > replay.
+- Training: logistic, random forest and boosted trees; GRU, temporal CNN and transformer (PyTorch → ONNX → onnxruntime-web). Validation on held-out people by default, a most-common-label baseline and a shuffled-label check in every report.
+- Five skill files for agents: orion-context, orion-research, orion-datasets, orion-train, orion-deploy.
+- Generated data with a planted signal (`paradigm_orion.synthetic`) and an end-to-end test against a stand-in PostHog server.
+
 ## 0.2.0
 
 - Fix: with PostHog's HTML snippet, the auto-start script attached to the snippet's placeholder, which the SDK replaces on load, so no batch ever reached PostHog while stats reported them as submitted. It now waits for the loaded SDK, and `createRecorder` rejects the placeholder.

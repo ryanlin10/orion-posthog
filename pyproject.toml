@@ -3,20 +3,24 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "posthog-telemetry-dataset"
-version = "0.2.0"
-description = "Recipe-driven, local telemetry training dataset construction"
-readme = "docs/training.md"
-requires-python = ">=3.10"
+name = "paradigm-orion"
+version = "0.1.0"
+description = "Orion: input telemetry on PostHog, sentiment classifiers trained from it, and live labels for agents"
+readme = "README.md"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = []
+dependencies = ["pyyaml>=6", "scikit-learn==1.9.1"]
 
 [project.optional-dependencies]
-training = ["scikit-learn==1.9.1"]
+sequence = ["torch>=2.5", "onnx>=1.17"]
 
 [project.scripts]
-telemetry-dataset = "telemetry_dataset.__main__:main"
+orion = "paradigm_orion.cli:main"
+orion-dataset = "paradigm_orion.dataset.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["telemetry_dataset*"]
+include = ["paradigm_orion*"]
+
+[tool.setuptools.package-data]
+paradigm_orion = ["labellers/*.html"]

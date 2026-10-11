@@ -1,0 +1,38 @@
+# Frustration at checkout, labelled from what people write to the shop's assistant and from their sessions'
+# replay activity. Run: orion train recipes/checkout-sentiment.yaml
+name: checkout-sentiment
+source:
+  since: 30d
+  pages: [/checkout, /cart]
+target:
+  sentiment: [calm, frustrated]
+window:
+  length: 10s
+  align: past
+telemetry: [pointer, keyboard, scroll, focus]
+labels:
+  by: [human, model]
+  min_confidence: 0.6
+  model:
+    reads: [text, replay]
+    llm: claude-sonnet-5-5
+    guide: |
+      Frustrated: repeated failed attempts, complaints, giving up or going in circles.
+      A calm bug report, a correction or a short instruction is not frustration.
+    text:
+      event: $ai_generation
+      property: $ai_input
+split:
+  by: [user]
+  train: 0.7
+  validation: 0.15
+  test: 0.15
+model:
+  architecture: boosted_trees
+quality:
+  drop_gaps: true
+  drop_synthetic: true
+deploy:
+  live: true
+  context: [support-agent]
+  every: 2s

@@ -1,143 +1,156 @@
-# PostHog Behavioral Recorder
+# Orion
 
-Capture fine-grained keyboard and pointer telemetry **alongside the existing PostHog browser SDK**. Add one script to your site. No PostHog fork, server plugin, or replacement recorder.
+Fine-grained input telemetry on top of PostHog, sentiment classifiers trained from it, and live labels for your agents.
 
-- Key down **and** up, repeat flags, physical key codes, modifiers, and fractional timestamps.
-- Pointer down **and** up, clicks, cancellations, button state, pressure, and coordinates.
-- Every browser-provided movement sample, including coalesced samples and `pointerrawupdate` when available.
-- Small, versioned `behavioral_burst` custom events sent using `posthog.capture()`.
-- MIT licensed, no runtime dependencies, ESM and a single-script build.
+- **Connect.** One script after your PostHog snippet. No SDK fork, same sessions, same consent and opt-out.
+- **Capture.** Key press and release timing, every pointer sample the browser delivers (including coalesced and raw
+  updates), scrolling and focus changes, as `orion_input` events on the session's replay.
+- **Mask.** Keys are masked in the browser. By default Orion keeps when a key went down and came up, never which
+  key. Password fields and anything you mark send nothing.
+- **Train.** A YAML recipe declares the target, window, telemetry, labellers, split and model. Orion pulls the
+  data from PostHog, labels windows with AI (text people wrote, replay activity) or people, splits by person,
+  trains, checks the result against shuffled labels, and versions it.
+- **Agents.** The trained classifier runs in each visitor's browser. Every label goes to the page
+  (`orion.context()`) and to PostHog (`orion_label` events) for search, webhooks and replays, with plain-words evidence.
 
-**120 Hz is a measurement target, not a browser guarantee.** The recorder does not throttle to animation frames or fabricate intermediate points. It keeps all delivered samples, including rates above 120 Hz. Hardware, OS settings, browser support, timer precision, and load can produce lower rates. Use the included analyzer to measure the actual stream.
+Nothing is hosted by Orion: training runs on your machine and live labelling runs in your visitors' browsers.
 
-These are **custom analytics events**. They do not add native rrweb input events, change PostHog's native rage/dead-click flags, or automatically draw movement in its replay player. `$session_id` and per-sample timestamps allow correlation with your existing replay.
-
-## Add one script
-
-Download `recorder.js` from the [v0.2.0 release](https://github.com/ryanlin10/posthog-behavioral-recorder/releases/tag/v0.2.0), serve it from your site, and place this after your normal PostHog initialization:
+## Install on your site
 
 ```html
-<script defer src="/vendor/recorder.js"></script>
+<!-- your existing PostHog snippet -->
+<script>posthog.init('phc_…', { api_host: 'https://us.i.posthog.com' })</script>
+<script src="/vendor/orion.js" defer></script>
 ```
 
-The script waits for the PostHog SDK itself to finish loading, then creates `window.posthogBehavioral`. With PostHog's HTML snippet, `window.posthog` is only a placeholder that queues calls until `array.js` arrives and replaces it, so the script never attaches to the placeholder. It keeps checking (every second after the first 30 seconds) so a consent-gated `posthog.init()` still starts it. Install separately in each iframe that you own and want to record. Events do not cross iframe boundaries; desktop/global input is outside this script's scope.
-
-Optional configuration must appear before the script:
+`orion.js` is built into `dist/` by `npm run build`. It waits for the PostHog SDK to finish loading (the HTML
+snippet first installs a placeholder) and keeps waiting if your `init()` waits for consent. Options go before it:
 
 ```html
 <script>
-  window.posthogBehavioralOptions = {
-    keyboard: 'code',
-    // Connect this to your own consent state. Pending data is dropped when false.
+  window.orionOptions = {
+    mask: 'timing',                                // 'timing' (default), 'types' (letter/digit/space/delete…) or 'off'
+    models: ['/orion/checkout-sentiment.json'],    // from `orion deploy`; optional
     isAllowed: () => window.analyticsConsent === true,
-    excludeSelector: '[data-sensitive-workflow]'
+    excludeSelector: '[data-sensitive-workflow]',
   };
 </script>
-<script defer src="/vendor/recorder.js"></script>
 ```
 
-The existing SDK's `has_opted_out_capturing()` is also checked before collecting and submitting. Call `posthogBehavioral.pause()` immediately when consent is revoked to clear the in-memory buffer. `resume()`, `flush()`, `stop()`, and `getStats()` are available.
-
-## ESM / bundler
-
-The package is available from this repository; it is **not published to npm** by this release.
-
-```sh
-npm install github:ryanlin10/posthog-behavioral-recorder#v0.2.0
-```
+With a bundler:
 
 ```js
-import { createRecorder } from 'posthog-behavioral-recorder';
+import posthog from 'posthog-js';
+import { orion } from '@paradigmmachines/orion';
 
-// Run after your PostHog SDK is initialized (for example, its loaded callback).
-// Pass the loaded SDK instance; the HTML snippet's placeholder is rejected.
-const recorder = createRecorder(posthog, { keyboard: 'code' });
-// On component/application teardown:
-recorder.stop();
+posthog.init('phc_…', { api_host: 'https://us.i.posthog.com', loaded: ph => {
+  window.orion = orion.connect(ph, { mask: 'timing', models: ['/orion/checkout-sentiment.json'] });
+} });
 ```
 
-## What is collected
+The returned object has `context()`, `contextText()`, `labels()`, `onLabel(fn)`, `pause()`, `resume()`, `flush()`,
+`stop()`, `getStats()` and `ready` (a promise of the model names that loaded).
 
-Physical key codes are recorded by default, **not** `KeyboardEvent.key`, input values, clipboard contents, DOM text, selectors, URLs, or screenshots. **Physical key sequences can still reveal what somebody typed.** Use `keyboard: 'timing'` to omit codes and locations, or `'off'` to disable keyboard capture. Timing mode omits modifiers too and uses fresh opaque `press_id` values to pair overlapping down/up events without a stable key identity.
+### What is sent
 
-Password fields, `.ph-no-capture`, `.ph-sensitive`, `[data-private]`, and `[data-ph-behavior-ignore]` are excluded, including matching ancestors in open shadow trees. While an excluded element is focused, all input capture is suppressed. Closed shadow roots cannot expose internal exclusions: mark their host as excluded. The script does not automatically inherit arbitrary rrweb masking settings or custom SDK masking callbacks; mirror those with `excludeSelector` or `isAllowed`.
-
-The PostHog SDK still adds its normal event properties, such as URL and identity; this script's omissions do not disable your SDK's other data collection. Coordinate changes in coalesced packets are attributed to the dispatched event's target; this is not historical hit-testing for every sub-sample.
-
-## Options
-
-| Option | Default | Meaning |
+| Event | When | Contents |
 | --- | --- | --- |
-| `keyboard` | `'code'` | `'code'`, `'timing'`, or `'off'` |
-| `movementSource` | `'auto'` | Prefer raw updates; fall back to pointermove. Can force either source. |
-| `idleMs` | `500` | Idle gap that ends a burst |
-| `flushMs` | `1000` | Maximum ordinary buffer residence before submission |
-| `maxEvents` | `128` | Maximum records per chunk |
-| `recordFormat` | `'rows'` | `'columns'` enables lossless columnar JSON; use the included decoder |
-| `maxBytesPerMinute` | `0` | Optional recorder-property byte budget per fixed 60-second period; 0 disables |
-| `maxTotalBytes` | `0` | Optional lifetime byte budget per recorder instance; 0 disables |
-| `maxBytes` | `48000` | Maximum UTF-8 JSON bytes of recorder properties, excluding SDK enrichment |
-| `excludeSelector` | — | Additional CSS exclusions |
-| `isAllowed` | `() => true` | Your permission/consent gate |
-| `allowSynthetic` | `false` | Controlled tests only; never enable just to increase apparent sampling rate |
+| `orion_session_start` | once per page load | Orion version, mask, pointer source, model names |
+| `orion_input` | every few seconds of activity | Input records ([format](docs/data-format.md)), batched to keep the event count low |
+| `orion_label` | when a live label changes, and every 60 s while it holds | model, version, label, confidence, plain-words evidence, agents |
 
-Pointer events are required. Raw updates/coalescing require supported browsers and generally HTTPS. No `mousemove` compatibility fallback is provided for browsers without Pointer Events. Source selection is capability-based, not a claim that the chosen source actually achieves 120 Hz; force `pointermove` if a browser advertises but does not deliver raw updates.
+Never sent: key identities (in the default mask), typed text, field values, clipboard, DOM text or selectors.
+Password fields, `.ph-no-capture`, `.ph-sensitive`, `[data-private]`, `[data-ph-behavior-ignore]` and your
+`excludeSelector` are silent, and all input pauses while one has focus. Input timing can still identify a person,
+so treat it as personal data. `has_opted_out_capturing()` and your `isAllowed` are checked before capture and
+before any label is sent. Call `pause()` when consent is withdrawn.
 
-## Data and analysis
+PostHog bills per event, so Orion sends larger batches every few seconds instead of one per burst. Live labels
+are computed in the page, so they do not wait for uploads.
 
-See [the v1 data specification](docs/data-format.md). Burst boundaries represent input inactivity; they do not imply emotion or frustration. Down/up pairs may cross chunks and bursts. Blur, pagehide, and hidden-document boundaries mark uncertainty; no release events are fabricated.
-
-```js
-import { analyzeBatches } from 'posthog-behavioral-recorder/analysis';
-const result = analyzeBatches(exportedEvents.map(event => event.properties));
-console.log(result.keyHoldMs, result.movement);
-```
-
-The analyzer groups and orders batches by recorder ID and sequence, deduplicates retries (first copy wins), and reports `duplicateBatches` and `missingBatches`. Missing batches are detectable only between received sequence numbers; missing prefixes or tails are unknown. Key holds and movement intervals never span a detected gap or a boundary, including exclusions and observed consent interruptions. Duration arithmetic uses relative timestamps to preserve their precision. Results are grouped by recorder rather than globally time-sorted.
-
-It computes key holds, unmatched releases, and pointer cadence. Movement intervals of 100 ms or longer are excluded from its active-motion cadence statistic; this is a reporting convention, not evidence the user was inactive.
-
-Optional byte budgets bound attempted recorder-property payloads before SDK enrichment. They are not network or billing caps: SDK overhead, retries and other events are outside them. Budget refusal drops the whole chunk, increments loss counters and marks a continuity gap; it does not downsample.
-
-High-resolution telemetry is data-heavy. At 120 samples/second, continuous movement produces 432,000 samples/hour; higher rates produce more. Batching reduces event counts, not the amount of source information. Profile payload volume and PostHog billing on your own traffic before broad rollout. SDK-level filters, consent, network failure, and browser termination can still prevent delivery. `submitted` means accepted by the SDK, **not acknowledged by PostHog**. A batch the SDK refuses (opt-out, `before_send`, bot filter) counts as dropped and leaves a `capture-gap` boundary. No custom disk queue or background retries are added.
-
-## How it uses the PostHog SDK
-
-- Batches go through `posthog.capture()` with `skip_client_rate_limiting: true`. The SDK's client-side limit (10 events/second with a burst of 100 by default) is one budget shared by every event on the page. Without the flag, high-rate input would get recorder batches silently refused **and** use up the budget your own events need. PostHog's server-side quotas and billing still apply.
-- Ordinary chunks preserve SDK request batching via `_batchKey`. This is an internal adapter detail tested against SDK 1.280.0 and 1.438.7; rerun the browser compatibility suite when upgrading. Hidden/pagehide flushes request immediate beacon delivery.
-- `$session_id` is set by the SDK when the batch is submitted. The recorder discards buffered input if the session or person changed before submission, so every record in a batch belongs to that session.
-- Recorder IDs use `crypto.randomUUID()` where available and fall back to `crypto.getRandomValues()` on plain-HTTP pages.
-
-## Build configurable training datasets
-
-The included Python builder turns exported telemetry plus interval annotations into reproducible train/validation/test JSONL datasets. Edit a recipe to choose arbitrary categorical, multilabel or numeric targets, window sizes, feature families, custom Python extractors, quality rules, and participant/day splits.
+## Train a classifier
 
 ```sh
-python3 -m telemetry_dataset --recipe recipes/sentiment.json \
-  --batches events.jsonl --labels labels.jsonl \
-  --recordings recordings.jsonl --out datasets/experiment-1
+pip install paradigm-orion                     # Python 3.11+; add [sequence] for GRU/TCN/transformer
+orion init --host https://us.posthog.com --project 12345
+export POSTHOG_PERSONAL_API_KEY=phx_…          # query:read, batch_export:read, batch_export:write
+export ANTHROPIC_API_KEY=sk-ant-…              # only for the AI labellers
+
+orion pull --since 30d --recipe recipes/checkout-sentiment.yaml
+orion label human recipes/checkout-sentiment.yaml     # optional: a local labelling page with replay links
+orion train recipes/checkout-sentiment.yaml           # labels, builds a dataset version, trains, reports
+orion deploy checkout-sentiment --out public/orion --context support-agent
 ```
 
-It stages telemetry in SQLite, strips key identities from model inputs, keeps label provenance, and reports rejected windows. No labels are inferred from the telemetry. The builder uses only Python's standard library; an optional scikit-learn trainer provides a runnable baseline. See the [training guide](docs/training.md) for input formats, custom recipes and the complete synthetic demo.
+The recipe format is in the [orion-datasets skill](skills/orion-datasets/SKILL.md) and an example in
+[recipes/checkout-sentiment.yaml](recipes/checkout-sentiment.yaml).
+
+- **Pull** uses PostHog's file download exports (one week per export), as PostHog asks of tools that read events in
+  bulk. The query API is used only for one session's labels and for label search.
+- **Labellers.** *Text* reads what people wrote (by default PostHog LLM analytics `$ai_generation` events, or a
+  file) and labels the input while they wrote it, judging each message against the person's own baseline. *Replay*
+  reads the session's page views, clicks with element text, rage and dead clicks, errors and survey answers, and
+  labels fixed windows. *Human* serves a page at 127.0.0.1 with each window's input strip and a link to the replay
+  at that moment. AI answers are cached; human labels beat text labels beat replay labels where they overlap.
+- **Training** splits by person by default, so validation is people the model never saw. Every report compares the
+  model with always guessing the most common label and with the same model trained on shuffled labels, in a
+  plain summary line.
+- **Models.** Boosted trees, random forests and logistic regression on window features run in the browser as
+  plain JavaScript (orion.js is 26 KB, 11 KB compressed, including capture). GRU, temporal CNN and transformer models on 100 ms time
+  steps are exported to ONNX and run with onnxruntime-web.
+
+In Python:
+
+```python
+from paradigm_orion import Orion
+
+orion = Orion(posthog_project="acme-web")
+clf = orion.train("recipes/checkout-sentiment.yaml")
+print(clf.summary)
+clf.deploy(out="public/orion", context=["support-agent"])
+```
+
+## Labels for agents
+
+```sh
+orion context <session_id>                 # YAML block for a prompt; --json for structured
+orion search --label frustrated --page /checkout --last 30d
+```
+
+```js
+// In the page, instantly:
+fetch('/api/assistant', { method: 'POST', body: JSON.stringify({ message, orion: window.orion.contextText() }) });
+```
+
+Skill files in [skills/](skills/) teach coding and research agents the CLI: `orion-context`, `orion-research`,
+`orion-datasets`, `orion-train` and `orion-deploy` (`npx skills add ryanlin10/posthog-behavioral-recorder`).
+
+## Try it without a PostHog project
+
+```python
+from paradigm_orion.synthetic import generate, write_export
+rows, truth = generate(people=30)
+write_export(rows, "synthetic.jsonl.gz")
+```
+
+```sh
+orion pull --file synthetic.jsonl.gz --text-event '$ai_generation'
+orion train recipes/checkout-sentiment.yaml
+```
+
+The generated people have a planted calm/frustrated signal; it tests the pipeline, not people.
 
 ## Develop and test
 
 ```sh
-npm ci
-npm run build
-npm test
-npm run test:training
-npx playwright install chromium  # if Chrome is not installed locally
-npm run test:browser
-npm run demo                    # http://127.0.0.1:4173
+npm ci && npm run build
+npm test                      # JS unit tests, including feature parity with the Python builder
+npm run test:browser          # Chrome + the real PostHog SDK (POSTHOG_SDK=posthog-js-current for the latest)
+python3.13 -m venv .venv && .venv/bin/pip install -e '.[sequence]' onnxruntime
+npm run test:python           # builder, labellers, export parity, end-to-end on generated data
 ```
 
-The demo stores packets in its tab only. Browser tests exercise trusted Chrome input and run the real PostHog SDK with requests intercepted locally. They never submit to a real project. See [validation](docs/validation.md) and [CrowdCast testing](docs/crowdcast.md).
+The browser computes the same window features and time steps as the Python builder, and runs exported models
+with the same outputs as scikit-learn and PyTorch; tests check both on generated data.
 
-## Sources
-
-- [PostHog custom events](https://posthog.com/docs/libraries/js/usage)
-- [Coalesced pointer events](https://developer.mozilla.org/en-US/docs/Web/API/PointerEvent/getCoalescedEvents)
-- [Raw pointer updates](https://developer.mozilla.org/en-US/docs/Web/API/Element/pointerrawupdate_event)
-
-Independent community project; not affiliated with PostHog. Contributions should preserve source timestamps, explicit gaps, privacy exclusions, and the distinction between observed input and inferred behavior.
+Independent project; not affiliated with PostHog. MIT licence.

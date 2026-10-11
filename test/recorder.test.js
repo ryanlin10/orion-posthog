@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { createRecorder } from '../src/index.js';
 import { analyzeBatches } from '../src/analysis.js';
 import { webcrypto } from 'node:crypto';
-import { environment } from './helpers.js';
+import { environment, LEGACY } from './helpers.js';
 
 function setup(t, options = {}) {
   const env = environment();
-  const recorder = createRecorder(env.posthog, { window: env.win, allowSynthetic: true, ...options });
+  const recorder = createRecorder(env.posthog, { ...LEGACY, window: env.win, allowSynthetic: true, ...options });
   t.after(() => recorder.stop());
   return { ...env, recorder, rows: () => env.calls.flatMap(c => c[1].records) };
 }
@@ -34,7 +34,7 @@ test('all 120Hz coalesced samples retained; parent not duplicated', t => {
 });
 test('selects raw updates without also capturing pointermove', t => {
   const e = environment(); e.win.onpointerrawupdate = null;
-  const r = createRecorder(e.posthog, { window: e.win, allowSynthetic: true }); t.after(() => r.stop());
+  const r = createRecorder(e.posthog, { ...LEGACY, window: e.win, allowSynthetic: true }); t.after(() => r.stop());
   e.emit('pointermove'); e.emit('pointerrawupdate'); r.flush();
   assert.equal(e.calls[0][1].records.length, 1);
   assert.equal(e.calls[0][1].capture.movement_source, 'pointerrawupdate');
@@ -75,7 +75,7 @@ test('identity change never attributes old buffered input to a new person', t =>
 test('timing mode omits code and location; off mode omits keyboard', t => {
   const e = setup(t, { keyboard: 'timing' }); e.emit('keydown', { code: 'KeyA', location: 1 }); e.recorder.flush();
   assert.equal('code' in e.rows()[0], false); assert.equal('location' in e.rows()[0], false);
-  e.recorder.stop(); const r = createRecorder(e.posthog, { window: e.win, keyboard: 'off', allowSynthetic: true });
+  e.recorder.stop(); const r = createRecorder(e.posthog, { ...LEGACY, window: e.win, keyboard: 'off', allowSynthetic: true });
   e.emit('keyup'); r.stop(); assert.equal(e.rows().length, 1);
 });
 test('idle gaps create distinct bursts; max chunk limits do not', t => {
@@ -99,7 +99,7 @@ test('lifecycle boundaries with nothing buffered ride on the next input instead 
   assert.deepEqual(analyzeBatches(e.calls.map(c => c[1])).keyHoldMs, []);
 });
 test('stop cleans listeners and timers; duplicate instances rejected', t => {
-  const e = setup(t); assert.throws(() => createRecorder(e.posthog, { window: e.win }), /already/);
+  const e = setup(t); assert.throws(() => createRecorder(e.posthog, { ...LEGACY, window: e.win }), /already/);
   e.recorder.stop(); e.emit('keydown'); assert.equal(e.rows().length, 0);
 });
 test('untrusted events excluded unless explicitly allowed', t => {
@@ -122,7 +122,7 @@ test('SDK identity lookup errors drop buffered input and still allow cleanup', t
   assert.equal(e.recorder.getStats().stopped, true);
   assert.equal(e.recorder.getStats().dropped, 1);
   assert.equal(e.recorder.getStats().errors, 1);
-  const replacement = createRecorder(e.posthog, { window: e.win }); replacement.stop();
+  const replacement = createRecorder(e.posthog, { ...LEGACY, window: e.win }); replacement.stop();
 });
 
 test('capture-only clients do not override SDK session enrichment with null', t => {
@@ -183,7 +183,7 @@ test('the HTML snippet placeholder is rejected instead of silently queueing fore
 test('batches the SDK refuses are counted as dropped and break continuity', t => {
   const e = environment(), capture = e.posthog.capture;
   e.posthog.__loaded = true; // posthog-js reports refusals by returning undefined
-  e.recorder = createRecorder(e.posthog, { window: e.win, allowSynthetic: true }); t.after(() => e.recorder.stop());
+  e.recorder = createRecorder(e.posthog, { ...LEGACY, window: e.win, allowSynthetic: true }); t.after(() => e.recorder.stop());
   e.posthog.capture = (...args) => { e.calls.push(structuredClone(args)); return undefined; };
   e.emit('keydown', { code: 'KeyA', timeStamp: 1 }); e.recorder.flush();
   assert.deepEqual(e.recorder.getStats(), { ...e.recorder.getStats(), submitted: 0, batches: 0, dropped: 1 });
@@ -195,7 +195,7 @@ test('batches the SDK refuses are counted as dropped and break continuity', t =>
 
 test('recorder IDs do not require a secure context', t => {
   const e = environment(); e.win.crypto = { getRandomValues: a => webcrypto.getRandomValues(a) };
-  const r = createRecorder(e.posthog, { window: e.win, allowSynthetic: true }); t.after(() => r.stop());
+  const r = createRecorder(e.posthog, { ...LEGACY, window: e.win, allowSynthetic: true }); t.after(() => r.stop());
   e.emit('keydown'); r.flush();
   assert.match(e.calls[0][1].recorder_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 });

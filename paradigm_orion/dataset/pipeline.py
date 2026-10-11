@@ -7,12 +7,15 @@ from pathlib import Path
 import sqlite3
 import tempfile
 from collections import Counter
+from contextlib import closing
 
 from . import __version__
 from .config import finite, recipe_config
 from .features import extract_features
 
-KINDS = {"keydown", "keyup", "pointermove", "pointerdown", "pointerup", "pointercancel", "click", "dblclick", "contextmenu", "wheel", "scroll", "resize", "boundary"}
+TELEMETRY_EVENTS = ("orion_input", "behavioral_burst")
+SCHEMAS = ("1.0", "1.1", "1.2", "1.3")
+KINDS = {"keydown", "keyup", "pointermove", "pointerdown", "pointerup", "pointercancel", "click", "dblclick", "contextmenu", "wheel", "scroll", "resize", "focusin", "focusout", "boundary"}
 NUMERIC_FIELDS = {"x", "y", "page_x", "page_y", "dx", "dy", "dz", "mode", "pressure", "tilt_x", "tilt_y", "twist", "width", "height", "dpr", "pointer_id", "button"}
 
 
@@ -106,11 +109,11 @@ def split_for(group, config):
 def ingest(db, paths, metadata, counts):
     for path in paths:
         for envelope in jsonl(path):
-            if "event" in envelope and envelope["event"] != "behavioral_burst":
+            if "event" in envelope and envelope["event"] not in TELEMETRY_EVENTS:
                 counts["non_telemetry_events"] += 1
                 continue
             batch = envelope.get("properties", envelope)
-            if not isinstance(batch, dict) or batch.get("schema_version") not in ("1.0", "1.1", "1.2"):
+            if not isinstance(batch, dict) or batch.get("schema_version") not in SCHEMAS:
                 raise ValueError("Unsupported telemetry schema")
             recorder = identifier(batch.get("recorder_id"), "recorder_id")
             if recorder not in metadata:
@@ -343,7 +346,7 @@ def build_dataset(recipe_path, batch_paths, labels_path, recordings_path, output
     # Publish only a completed dataset; the SQLite spool and failed builds stay temporary.
     with tempfile.TemporaryDirectory(prefix="telemetry-build-", dir=output.parent) as temporary:
         root = Path(temporary)
-        with sqlite3.connect(root / "staging.sqlite") as db:
+        with closing(sqlite3.connect(root / "staging.sqlite")) as db:
             db.executescript("""
                 CREATE TABLE batches(recorder TEXT, seq INTEGER, digest TEXT, payload TEXT, PRIMARY KEY(recorder,seq));
                 CREATE TABLE events(recorder TEXT, t REAL, ordinal INTEGER, payload TEXT, synthetic INTEGER, quality_known INTEGER);

@@ -3,8 +3,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from telemetry_dataset.pipeline import build_dataset, decode_records
-from telemetry_dataset.config import recipe_config
+from paradigm_orion.dataset.pipeline import build_dataset, decode_records
+from paradigm_orion.dataset.config import recipe_config
 
 
 class DatasetTests(unittest.TestCase):

@@ -1,7 +1,7 @@
 {
-  "name": "posthog-behavioral-recorder",
-  "version": "0.2.0",
-  "description": "High-resolution keyboard and pointer bursts alongside the PostHog browser SDK",
+  "name": "@paradigmmachines/orion",
+  "version": "0.1.0",
+  "description": "Fine-grained input telemetry on top of PostHog, with live sentiment labels for your agents",
   "type": "module",
   "license": "MIT",
   "main": "./src/index.js",
@@ -15,7 +15,8 @@
     "./codec": {
       "types": "./src/codec.d.ts",
       "import": "./src/codec.js"
-    }
+    },
+    "./auto": "./src/auto.js"
   },
   "files": [
     "src",
@@ -23,11 +24,8 @@
     "LICENSE",
     "README.md",
     "docs",
-    "pyproject.toml",
     "recipes",
-    "telemetry_dataset/*.py",
-    "examples/training/*.py",
-    "examples/training/*.json"
+    "skills"
   ],
   "scripts": {
     "build": "node scripts/build.js",
@@ -36,10 +34,12 @@
     "check": "npm run build && npm test && npm run test:browser",
     "demo": "node scripts/serve.js",
     "prepack": "npm run build",
-    "test:training": "python3 -m unittest discover -s test/training -v"
+    "test:training": ".venv/bin/python -m unittest discover -s test/training -v",
+    "test:python": ".venv/bin/python -m unittest discover -s test/training -v"
   },
   "devDependencies": {
     "esbuild": "0.25.12",
+    "onnxruntime-web": "1.30.0",
     "playwright": "1.56.1",
     "posthog-js": "1.280.0",
     "posthog-js-current": "npm:posthog-js@1.438.7"
@@ -50,5 +50,12 @@
   },
   "engines": {
     "node": ">=22"
-  }
+  },
+  "keywords": [
+    "posthog",
+    "telemetry",
+    "sentiment",
+    "session-replay",
+    "agents"
+  ]
 }

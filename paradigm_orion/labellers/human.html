@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orion labelling</title>
+<style>
+  :root { --bg: #fafaf9; --panel: #fff; --ink: #18181b; --ink-2: #52525b; --ink-3: #a1a1aa; --line: #e4e4e7; --accent: #18181b; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0c0c0e; --panel: #151518; --ink: #f4f4f5; --ink-2: #a1a1aa; --ink-3: #71717a; --line: #27272a; --accent: #f4f4f5; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 920px; margin: 0 auto; padding: 24px 16px 64px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .muted { color: var(--ink-2); }
+  .bar { height: 4px; background: var(--line); border-radius: 2px; margin: 12px 0 20px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .2s; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  canvas { width: 100%; height: 180px; display: block; }
+  .meta { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 13px; margin-bottom: 10px; }
+  a { color: inherit; }
+  .choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+  button:hover { border-color: var(--ink-3); }
+  button.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  button kbd { font: 11px ui-monospace, monospace; color: var(--ink-3); margin-left: 6px; }
+  button.on kbd { color: inherit; opacity: .7; }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+  .ai { margin-top: 14px; font-size: 13px; color: var(--ink-2); }
+  input[type=range] { width: 260px; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--ink-2); margin-top: 8px; flex-wrap: wrap; }
+  .empty { padding: 48px 0; text-align: center; color: var(--ink-2); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="title">Orion labelling</h1>
+    <span class="muted" id="progress"></span>
+  </header>
+  <div class="bar"><i id="fill"></i></div>
+  <div id="view"></div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+let state = null, item = null, index = 0, sure = true;
+
+async function api(path, body) {
+  const res = await fetch(path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function progress() {
+  $('#title').textContent = `Orion labelling · ${state.recipe}`;
+  $('#progress').textContent = `${state.done} of ${state.total} windows labelled`;
+  $('#fill').style.width = `${state.total ? (100 * state.done / state.total) : 0}%`;
+}
+
+function choices() {
+  const t = state.target;
+  if (t.type === 'continuous') return null;
+  return t.binary ? [['yes', 'Yes'], ['no', 'No']] : t.classes.map(c => [c, c]);
+}
+
+function draw(canvas, s) {
+  const dpr = devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const g = canvas.getContext('2d'); g.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement);
+  const ink = css.getPropertyValue('--ink'), ink3 = css.getPropertyValue('--ink-3'), line = css.getPropertyValue('--line');
+  const L = 64, X = t => L + t / s.length_ms * (w - L - 4);
+  const lanes = { pointer: [6, 70], keys: [84, 104], clicks: [116, 134], scroll: [146, 160], focus: [168, 176] };
+  g.font = '11px ui-monospace, monospace'; g.textBaseline = 'middle'; g.fillStyle = ink3;
+  for (const [name, [a, b]] of Object.entries(lanes)) g.fillText(name, 0, (a + b) / 2);
+  g.strokeStyle = line; g.lineWidth = 1;
+  for (let sec = 0; sec <= s.length_ms / 1000; sec++) { const x = Math.round(X(sec * 1000)) + .5; g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke(); }
+  const max = Math.max(800, ...s.speed);
+  g.beginPath();
+  s.speed.forEach((v, i) => { const x = X(i * 100), y = lanes.pointer[1] - v / max * (lanes.pointer[1] - lanes.pointer[0]); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+  g.strokeStyle = ink; g.lineWidth = 1.25; g.stroke();
+  g.fillStyle = ink;
+  for (const [a, b] of s.keys) g.fillRect(X(a), lanes.keys[0], Math.max(2, X(b ?? a + 60) - X(a)), lanes.keys[1] - lanes.keys[0]);
+  for (const t of s.clicks) g.fillRect(X(t) - 1, lanes.clicks[0], 2, lanes.clicks[1] - lanes.clicks[0]);
+  for (const t of s.scrolls) g.fillRect(X(t), lanes.scroll[0], 1, lanes.scroll[1] - lanes.scroll[0]);
+  for (const [t, on] of s.focus) { g.fillStyle = on ? ink : ink3; g.fillRect(X(t) - 2, lanes.focus[0], 4, lanes.focus[1] - lanes.focus[0]); }
+  g.fillStyle = ink3;
+  for (const [t] of s.gaps) g.fillRect(X(t), 0, 2, h);
+}
+
+function render() {
+  progress();
+  if (!state.total) { $('#view').innerHTML = '<div class="empty">No windows to label. Run <code>orion pull</code> first.</div>'; return; }
+  const opts = choices();
+  const m = Math.floor(item.offset_ms / 60000), s = Math.floor(item.offset_ms / 1000) % 60;
+  const at = `${m}:${String(s).padStart(2, '0')}`;
+  $('#view').innerHTML = `
+    <div class="card">
+      <div class="meta"><span>Window ${item.index + 1} of ${state.total} · session ${esc(item.session_id.slice(0, 12))}… at about ${at}</span>
+        ${item.replay_url ? `<a href="${esc(item.replay_url)}" target="_blank" rel="noopener">Open replay at ${at} ↗</a>` : '<span class="muted">Set a PostHog project for replay links</span>'}</div>
+      <canvas id="strip"></canvas>
+      <div class="legend"><span>pointer: speed</span><span>keys: each press, held</span><span>clicks</span><span>scroll steps</span><span>focus: in (solid) / out (faint)</span><span>grey line: capture gap</span></div>
+      <div class="choices" id="choices"></div>
+      <div class="row"><button id="sure" class="${sure ? 'on' : ''}">Sure</button><button id="unsure" class="${sure ? '' : 'on'}">Unsure</button>
+        <span style="flex:1"></span><button id="prev">← Back</button><button id="skip">Skip <kbd>S</kbd></button></div>
+      ${item.ai.length ? `<div class="ai">AI labels: ${item.ai.map(a => `${esc(a.labeller)} says <b>${esc(a.value)}</b> (${Math.round(a.confidence * 100)}%) — ${esc(a.reason)}`).join('; ')}</div>` : ''}
+    </div>`;
+  draw($('#strip'), item.strip);
+  const box = $('#choices');
+  if (opts) {
+    opts.forEach(([value, text], k) => {
+      const b = document.createElement('button');
+      b.innerHTML = `${esc(text)}<kbd>${k + 1}</kbd>`; if (item.answer === value) b.className = 'on';
+      b.onclick = () => answer(value); box.append(b);
+    });
+  } else {
+    const t = state.target, r = document.createElement('input');
+    Object.assign(r, { type: 'range', min: t.min, max: t.max, step: (t.max - t.min) / 100, value: item.answer ?? (t.min + t.max) / 2 });
+    const ok = document.createElement('button'); ok.textContent = 'Save';
+    ok.onclick = () => answer(Number(r.value)); box.append(r, ok);
+  }
+  $('#sure').onclick = () => { sure = true; render(); };
+  $('#unsure').onclick = () => { sure = false; render(); };
+  $('#prev').onclick = () => go(Math.max(0, index - 1));
+  $('#skip').onclick = () => go(Math.min(state.total - 1, index + 1));
+}
+
+async function go(i) { index = i; item = await api(`/api/item/${i}`); render(); }
+async function answer(value) {
+  state = await api('/api/label', { id: item.id, value, confidence: sure ? 1 : 0.6 });
+  const next = state.items.findIndex((w, k) => k > index && !w.answered);
+  await go(next >= 0 ? next : Math.min(state.total - 1, index + 1));
+}
+
+addEventListener('keydown', e => {
+  if (!item || e.target.tagName === 'INPUT') return;
+  const opts = choices();
+  if (opts && /^[1-9]$/.test(e.key) && opts[e.key - 1]) answer(opts[e.key - 1][0]);
+  else if (e.key === 's' || e.key === 'ArrowRight') go(Math.min(state.total - 1, index + 1));
+  else if (e.key === 'ArrowLeft') go(Math.max(0, index - 1));
+});
+addEventListener('resize', () => item && draw($('#strip'), item.strip));
+
+(async () => {
+  state = await api('/api/state');
+  if (!state.total) return render();
+  const first = state.items.findIndex(w => !w.answered);
+  await go(first >= 0 ? first : 0);
+})();
+</script>
+</body>
+</html>

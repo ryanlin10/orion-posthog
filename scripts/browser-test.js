@@ -3,6 +3,7 @@ import { chromium } from 'playwright';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { serve } from './serve.js';
+import { decodeRecords } from '../src/codec.js';
 const localChrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const sdkName = process.env.POSTHOG_SDK ?? 'posthog-js';
 if (!['posthog-js', 'posthog-js-current'].includes(sdkName)) throw new Error('Unknown SDK test target');
@@ -17,6 +18,11 @@ function transportEvents(body) {
   const events = Array.isArray(data) ? data : Array.isArray(data.batch) ? data.batch : [data];
   assert.ok(events.length > 0 && events.every(e => typeof e.event === 'string'));
   return events;
+}
+function decode(body) {
+  if (!body) return '';
+  const encoded = new URLSearchParams(body).get('data');
+  return encoded ? Buffer.from(encoded, 'base64').toString('utf8') : body;
 }
 let browser;
 try {
@@ -68,29 +74,28 @@ try {
       // Test harness runs in headless Chrome; allow it only for this local fixture.
       opt_out_useragent_filter: true, disable_compression: true, request_batching: false, loaded: resolve }));
   });
-  await page.addScriptTag({ url: `${url}/dist/recorder.js` });
-  await page.waitForFunction(() => window.posthogBehavioral);
+  await page.addScriptTag({ url: `${url}/dist/orion.js` });
+  await page.waitForFunction(() => window.orion?.flush);
   await page.locator('input').focus(); await page.keyboard.type('ab');
-  await page.evaluate(() => posthogBehavioral.flush()); await page.waitForTimeout(500);
-  const decoded = requests.map(body => {
-    if (!body) return '';
-    const encoded = new URLSearchParams(body).get('data');
-    return encoded ? Buffer.from(encoded, 'base64').toString('utf8') : body;
-  });
-  const body = decoded.find(s => s.includes('behavioral_burst'));
-  if (!body) console.error(JSON.stringify({ requests: requests.map(s => s?.slice(0, 140)), stats: await page.evaluate(() => posthogBehavioral.getStats()), errors }));
-  assert.ok(body, 'Real SDK did not submit behavioral_burst');
+  await page.evaluate(() => orion.flush()); await page.waitForTimeout(500);
+  const decoded = requests.map(decode);
+  const body = decoded.find(s => s.includes('orion_input'));
+  if (!body) console.error(JSON.stringify({ requests: requests.map(s => s?.slice(0, 140)), stats: await page.evaluate(() => orion.getStats()), errors }));
+  assert.ok(body, 'Real SDK did not submit orion_input');
   const events = decoded.filter(Boolean).flatMap(transportEvents);
-  const bursts = events.filter(e => e.event === 'behavioral_burst').map(e => e.properties);
+  const bursts = events.filter(e => e.event === 'orion_input').map(e => e.properties);
+  assert.ok(events.some(e => e.event === 'orion_session_start' && e.properties.mask === 'timing'), 'No orion_session_start event');
   assert.ok(bursts.length > 0, 'SDK payload contains no recorder events');
   const sdkIdentity = await page.evaluate(() => ({ session: posthog.get_session_id(), person: posthog.get_distinct_id() }));
   assert.ok(bursts.every(b => b.$session_id === sdkIdentity.session && b.distinct_id === sdkIdentity.person));
-  assert.ok(bursts.every(b => b.schema_version === '1.2' && typeof b.time_origin_ms === 'number' && typeof b.clock.epoch_ms === 'number'));
-  assert.deepEqual(bursts.flatMap(b => b.records).filter(r => r.kind.startsWith('key')).map(r => [r.kind, r.code]),
-    [['keydown', 'KeyA'], ['keyup', 'KeyA'], ['keydown', 'KeyB'], ['keyup', 'KeyB']]);
+  assert.ok(bursts.every(b => b.schema_version === '1.3' && typeof b.time_origin_ms === 'number' && typeof b.clock.epoch_ms === 'number'));
+  // Default timing mask: presses pair by opaque ID; no key code, key class or modifier leaves the page.
+  const keys = bursts.flatMap(b => decodeRecords(b)).filter(r => r.kind.startsWith('key'));
+  assert.deepEqual(keys.map(r => [r.kind, r.press_id]), [['keydown', 1], ['keyup', 1], ['keydown', 2], ['keyup', 2]]);
+  assert.ok(keys.every(r => !('code' in r) && !('key_type' in r) && !('modifiers' in r)));
   assert.deepEqual(errors, []);
 
-  // Official HTML snippet: recorder.js runs while the snippet placeholder is still window.posthog.
+  // Official HTML snippet: orion.js runs while the snippet placeholder is still window.posthog.
   // The SDK replaces that object when array.js arrives, so the recorder must attach to the loaded instance.
   const snippet = await readFile(new URL('../test/fixtures/posthog-snippet.js', import.meta.url), 'utf8');
   const arrayJs = sdkScript;
@@ -109,18 +114,18 @@ try {
     posthog.init('phc_local_test_only', { api_host: location.origin + '/ingest', persistence: 'memory', autocapture: false,
       capture_pageview: false, capture_pageleave: false, disable_session_recording: true, advanced_disable_flags: true,
       opt_out_useragent_filter: true, disable_compression: true, request_batching: true });` });
-  await snippetPage.addScriptTag({ url: `${url}/dist/recorder.js` });
+  await snippetPage.addScriptTag({ url: `${url}/dist/orion.js` });
   assert.equal(await snippetPage.evaluate(() => Array.isArray(window.posthog._i)), true, 'SDK loaded before the recorder');
-  await snippetPage.waitForFunction(() => window.posthogBehavioral);
+  await snippetPage.waitForFunction(() => window.orion?.flush);
   await snippetPage.locator('input').focus(); await snippetPage.keyboard.type('ab');
-  await snippetPage.evaluate(() => posthogBehavioral.flush());
-  const delivered = () => snippetBodies.some(b => b.includes('behavioral_burst') && b.includes('KeyA'));
+  await snippetPage.evaluate(() => orion.flush());
+  const delivered = () => snippetBodies.some(b => b.includes('orion_input') && b.includes('keydown'));
   for (let i = 0; i < 50 && !delivered(); i++) await snippetPage.waitForTimeout(100);
   assert.ok(delivered(), 'Snippet install delivered nothing');
   snippetBodies.length = 0;
   await snippetPage.evaluate(() => {
-    posthogBehavioral.stop();
-    const r = PostHogBehavioral.createRecorder(posthog, { maxEvents: 1, allowSynthetic: true, movementSource: 'pointermove' });
+    orion.stop();
+    const r = Orion.createRecorder(posthog, { maxEvents: 1, allowSynthetic: true, movementSource: 'pointermove' });
     for (let i = 0; i < 20; i++) document.querySelector('input').dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: i }));
     r.stop();
   });
@@ -132,8 +137,7 @@ try {
   // Recorder batches must neither be refused by, nor drain, the SDK's shared client rate limit (burst 100).
   // This checks SDK acceptance; locally intercepted delivery of every request is slow and not the subject.
   const limited = await snippetPage.evaluate(() => {
-    posthogBehavioral.stop();
-    const r = PostHogBehavioral.createRecorder(posthog, { maxEvents: 1, allowSynthetic: true, movementSource: 'pointermove' });
+    const r = Orion.createRecorder(posthog, { maxEvents: 1, allowSynthetic: true, movementSource: 'pointermove' });
     const input = document.querySelector('input');
     for (let i = 0; i < 200; i++) input.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: i, pointerId: 1 }));
     r.stop();
@@ -142,6 +146,41 @@ try {
   assert.equal(limited.stats.dropped, 0); assert.ok(limited.stats.batches > 100);
   assert.equal(limited.hostAccepted, true, 'Recorder batches starved the host application events');
   await snippetPage.close();
+  assert.deepEqual(errors, []);
+
+  // Live labelling: a model served as a static file labels the session in the page, and the label goes to
+  // PostHog as an orion_label event tied to the same session.
+  const livePage = await browser.newPage(), liveBodies = [];
+  livePage.on('pageerror', error => errors.push(error.message));
+  await livePage.route('**/ingest/**', async route => {
+    liveBodies.push(route.request().postData() ?? '');
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"status":1}' });
+  });
+  await livePage.goto(`${url}/examples/sdk-test.html`);
+  await livePage.addScriptTag({ content: sdkScript });
+  await livePage.evaluate(async () => {
+    await new Promise(resolve => posthog.init('phc_local_test_only', { api_host: `${location.origin}/ingest`, persistence: 'memory', autocapture: false,
+      capture_pageview: false, capture_pageleave: false, disable_session_recording: true, advanced_disable_flags: true,
+      opt_out_useragent_filter: true, disable_compression: true, request_batching: false, loaded: resolve }));
+    window.orionOptions = { models: ['/test/fixtures/clicky-model.json'], live: { every: 500, confirm: 1 } };
+  });
+  await livePage.addScriptTag({ url: `${url}/dist/orion.js` });
+  await livePage.waitForFunction(() => window.orion?.ready);
+  assert.deepEqual(await livePage.evaluate(() => orion.ready), ['clicky']);
+  for (let i = 0; i < 12; i++) { await livePage.mouse.click(200, 60); await livePage.waitForTimeout(200); }
+  await livePage.waitForFunction(() => orion.context()?.label === 'yes', null, { timeout: 5000 });
+  const live = await livePage.evaluate(() => ({ context: orion.context(), text: orion.contextText(), session: posthog.get_session_id() }));
+  assert.equal(live.context.model, 'clicky');
+  assert.equal(live.context.session_id, live.session);
+  assert.match(live.text, /frustrated: yes/);
+  const labelEvents = () => liveBodies.map(decode).filter(b => b.includes('orion_label')).flatMap(transportEvents).filter(e => e.event === 'orion_label');
+  for (let i = 0; i < 30 && !labelEvents().length; i++) await livePage.waitForTimeout(100);
+  const labelEvent = labelEvents().at(-1);
+  assert.ok(labelEvent, 'No orion_label event reached the SDK transport');
+  assert.equal(labelEvent.properties.label, 'yes');
+  assert.deepEqual(labelEvent.properties.agents, ['support-agent']);
+  assert.equal(labelEvent.properties.$session_id, live.session);
+  await livePage.close();
   assert.deepEqual(errors, []);
 
   // Exercise the actual DOM listener at synthetic 120/1000/8000 Hz timestamps.
@@ -160,7 +199,7 @@ try {
           count++;
         }
       } };
-      const r = createRecorder(sink, { allowSynthetic: true, movementSource: 'pointermove' });
+      const r = createRecorder(sink, { allowSynthetic: true, movementSource: 'pointermove', recordFormat: 'rows' });
       const start = performance.now(), input = document.querySelector('#typing');
       for (let i = 0; i < hz * 10; i++) {
         const event = new PointerEvent('pointermove', { bubbles: true, clientX: i, pointerId: 1 });
@@ -182,7 +221,7 @@ try {
     const result = await page.evaluate(async trace => {
       recorder.stop(); batches.length = 0;
       const { createRecorder } = await import('/src/index.js');
-      window.recorder = createRecorder(mockPosthog, { allowSynthetic: true, movementSource: 'pointermove' });
+      window.recorder = createRecorder(mockPosthog, { allowSynthetic: true, movementSource: 'pointermove', recordFormat: 'rows' });
       const input = document.querySelector('#typing');
       for (const item of trace.events) {
         if (item.type === 'boundary') { recorder.flush(); recorder.pause(); recorder.resume(); continue; }
@@ -202,5 +241,5 @@ try {
     console.log(JSON.stringify({ crowdcast: 'passed', clock: trace.clock, preservedEvents: expected.length, syntheticFixture: true }));
   }
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ browser: await browser.version(), sdkVersion, checks: 'trusted input, pointer down/up, shadow password exclusion, real PostHog SDK payload and identity, script-tag auto-start, official snippet install, SDK rate-limit isolation, transport batching, private fixture isolation', status: 'passed' }));
+  console.log(JSON.stringify({ browser: await browser.version(), sdkVersion, checks: 'trusted input, pointer down/up, shadow password exclusion, real PostHog SDK payload and identity, script-tag auto-start, official snippet install, live labels from a served model, SDK rate-limit isolation, transport batching, private fixture isolation', status: 'passed' }));
 } finally { await browser?.close(); await new Promise(resolve => server.close(resolve)); }

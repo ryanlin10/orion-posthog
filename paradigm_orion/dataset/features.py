@@ -12,15 +12,15 @@ def summary(prefix, values):
 
 
 def extract_features(events, context, families):
-    holds, intervals, movement_dt, speeds, scroll_dt, click_holds, click_dt = [], [], [], [], [], [], []
+    holds, intervals, movement_dt, speeds, scroll_dt, click_holds, click_dt, dwell = [], [], [], [], [], [], [], []
     held, pointers, click_held = {}, {}, {}
-    previous_down = previous_scroll = previous_click = None
+    previous_down = previous_scroll = previous_click = focus_start = None
     downs = unmatched = overlaps = 0
     path = 0.0
     for row in events:
         kind, t = row["kind"], row["t"]
         if kind == "boundary":
-            held.clear(); pointers.clear(); click_held.clear(); previous_down = previous_scroll = previous_click = None
+            held.clear(); pointers.clear(); click_held.clear(); previous_down = previous_scroll = previous_click = focus_start = None
             continue
         if kind == "keydown" and not row.get("repeat", False):
             downs += 1
@@ -62,6 +62,12 @@ def extract_features(events, context, families):
                 click_holds.append(t - down[0])
         elif kind == "pointercancel":
             click_held = {k:v for k,v in click_held.items() if v[1] != row.get("pointer_id", 0)}
+        elif kind == "focusin":
+            focus_start = t
+        elif kind == "focusout":
+            if focus_start is not None and t >= focus_start:
+                dwell.append(t - focus_start)
+            focus_start = None
     result = {}
     if "keyboard" in families:
         result.update(summary("key_hold_ms", holds))
@@ -75,6 +81,8 @@ def extract_features(events, context, families):
         result.update(summary("click_interval_ms", click_dt))
     if "scroll" in families:
         result.update(summary("scroll_interval_ms", scroll_dt))
+    if "focus" in families:
+        result.update(summary("focus_dwell_ms", dwell))
     if "volume" in families:
         result.update(key_down_count=downs, pointer_path_px=path, event_count=len(events), duration_ms=context["end_ms"] - context["start_ms"])
     quality = {"matched_key_pairs": len(holds), "unmatched_key_ups": unmatched, "open_key_downs": len(held),

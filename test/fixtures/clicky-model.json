@@ -1,0 +1,77 @@
+{
+  "format": "orion-model",
+  "format_version": 1,
+  "name": "clicky",
+  "version": 3,
+  "target": {
+    "name": "frustrated",
+    "type": "categorical",
+    "classes": [
+      "no",
+      "yes"
+    ],
+    "binary": true
+  },
+  "window": {
+    "size_ms": 4000,
+    "align": "past",
+    "min_events": 2,
+    "max_events": 100000,
+    "allow_gaps": false
+  },
+  "features": {
+    "families": [
+      "pointer"
+    ],
+    "exclude": [],
+    "names": [
+      "click_interval_ms_median"
+    ]
+  },
+  "preprocess": {
+    "impute": [
+      1000
+    ],
+    "indicators": [],
+    "mean": [
+      0
+    ],
+    "scale": [
+      1
+    ]
+  },
+  "estimator": {
+    "kind": "linear",
+    "coef": [
+      [
+        -0.01
+      ]
+    ],
+    "intercept": [
+      5
+    ],
+    "classes": [
+      "no",
+      "yes"
+    ]
+  },
+  "evidence": {
+    "reference": {
+      "click_interval_ms_median": 1500
+    },
+    "spread": {
+      "click_interval_ms_median": 500
+    },
+    "importance": {
+      "click_interval_ms_median": 1
+    }
+  },
+  "agents": [
+    "support-agent"
+  ],
+  "live": {
+    "every_ms": 1000,
+    "heartbeat_ms": 60000,
+    "confirm": 2
+  }
+}

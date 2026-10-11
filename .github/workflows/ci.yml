@@ -14,11 +14,11 @@ jobs:
       - run: npm ci
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - run: python -m pip install '.[training]'
+          python-version: '3.13'
+      - run: python -m pip install '.[sequence]' onnxruntime
       - run: python -m unittest discover -s test/training -v
       - run: python examples/training/make_demo.py
-      - run: python -m telemetry_dataset --recipe artifacts/training-demo-input/recipe.json --batches artifacts/training-demo-input/batches.jsonl --labels artifacts/training-demo-input/labels.jsonl --recordings artifacts/training-demo-input/recordings.jsonl --out artifacts/training-demo-output
+      - run: python -m paradigm_orion.dataset --recipe artifacts/training-demo-input/recipe.json --batches artifacts/training-demo-input/batches.jsonl --labels artifacts/training-demo-input/labels.jsonl --recordings artifacts/training-demo-input/recordings.jsonl --out artifacts/training-demo-output
       - run: python examples/training/train_classifier.py --dataset artifacts/training-demo-output --recipe examples/training/logistic.json --out artifacts/training-demo-model
       - run: npx playwright install --with-deps chromium
       - run: npm run check
@@ -27,5 +27,5 @@ jobs:
           POSTHOG_SDK: posthog-js-current
       - uses: actions/upload-artifact@v4
         with:
-          name: recorder-script
+          name: orion-script
           path: dist/

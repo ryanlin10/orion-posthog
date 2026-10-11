@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from telemetry_dataset.pipeline import dump, fingerprint
+from paradigm_orion.dataset.pipeline import dump, fingerprint
 
 HAS_SKLEARN = importlib.util.find_spec("sklearn") is not None
 
