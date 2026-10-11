@@ -114,7 +114,7 @@ python3 -m telemetry_dataset \
 
 The demo explicitly opts into synthetic labels and input. Its labels are unrelated to its telemetry: it tests the plumbing, not emotion prediction.
 
-An optional small-dataset reference trainer accepts its own JSON recipe:
+An optional small-dataset reference trainer accepts its own JSON recipe. It requires Python 3.11+ for the pinned scikit-learn version; use a 3.11+ virtual environment for the following commands:
 
 ```sh
 .venv/bin/python -m pip install '.[training]'
