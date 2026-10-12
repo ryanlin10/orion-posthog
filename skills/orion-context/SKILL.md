@@ -20,7 +20,20 @@ const text = window.orion.contextText(); // the same as a short YAML block for a
 window.orion.onLabel(ctx => { /* called when the label changes */ });
 ```
 
-Send `contextText()` with each message the page sends to the assistant's backend.
+Send `context()` with each message the page sends to the assistant's backend, and treat it as untrusted input: the
+visitor controls the browser and can change anything in it. On the server, keep a label only if the model name and
+label are ones you deployed (the recipe's classes) and the confidence is a number between 0 and 1, then write the
+prompt block yourself from those fields. Never paste text from the page (`contextText()`, `evidence`) into a system
+prompt. `contextText()` is for showing the label in the page or in logs.
+
+```js
+// server: build the block from checked fields only
+const LABELS = { 'checkout-sentiment': ['calm', 'engaged', 'confused', 'frustrated'] };
+function orionBlock(ctx) {
+  if (!ctx || !LABELS[ctx.model]?.includes(ctx.label) || !(ctx.confidence >= 0 && ctx.confidence <= 1)) return '';
+  return `user_state (from Orion, an inference): ${ctx.target} = ${ctx.label}, confidence ${ctx.confidence.toFixed(2)}`;
+}
+```
 
 **On a server (about a minute behind).** Labels also reach PostHog as `orion_label` events:
 

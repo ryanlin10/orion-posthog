@@ -129,6 +129,8 @@ come back: phase 2, after about two weeks or a few hundred answered questions.
    `--arch logistic` and keep the better validation score.
 3. `orion deploy site-sentiment --context support-agent` (writes to `public/orion`), and add the printed model URL to
    `models: [...]` in the Orion options. Re-run `orion survey … --out public/orion` too.
-4. Give the assistant the labels (orion-context skill): the page sends `window.orion?.contextText()` with each
-   message, and the server puts it in the system prompt. Server-side, `orion context <session id>` has the same.
+4. Give the assistant the labels (orion-context skill): the page sends `window.orion?.context()` with each message,
+   and the server checks it (known model and label, confidence a number) before writing its own line into the
+   system prompt. Never paste text from the page into a prompt. Server-side, `orion context <session id>` reads the
+   label from PostHog instead (about a minute behind).
 5. To investigate where people struggle, use the orion-research skill (`orion search --label frustrated`).

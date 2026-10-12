@@ -42,8 +42,9 @@ Answers arrive as `orion_self_report` events and become self-report labels on th
 
 ## Where labels go
 
-- **In the page:** `orion.context()`, `orion.contextText()`, `orion.onLabel(fn)`. Send `contextText()` to the
-  assistant's backend with each message.
+- **In the page:** `orion.context()`, `orion.contextText()`, `orion.onLabel(fn)`. Send `context()` to the
+  assistant's backend with each message and check it there before it reaches a prompt (see orion-context): the page
+  is the visitor's to change.
 - **PostHog:** an `orion_label` event on each change (and every 60 s while unchanged), on the same session as the
   replay. `orion context <session>` and `orion search` read these.
 - **Webhook:** in PostHog, add a destination (Data pipelines → Destinations → HTTP Webhook) filtered to the
