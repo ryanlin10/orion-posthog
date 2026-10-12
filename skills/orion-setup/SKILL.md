@@ -20,8 +20,10 @@ Work in two phases. Phase 1 is done today. Phase 2 needs a week or two of real d
   consent works. Do everything else yourself.
 - **Consent.** Input timing can identify a person, so treat it as personal data. If the app has a consent banner or
   opt-in, Orion must follow it. Orion already honours PostHog's opt-out.
-- **Never capture key identities.** Keep `mask: 'timing'`. Password fields are silent automatically; mark other
-  sensitive areas with `data-private`.
+- **Never capture key identities.** Keep `mask: 'timing'`: Orion then records when keys go down and up, never which
+  key or what is typed. Password fields are silent automatically. Do not mark ordinary forms, checkouts or chat boxes
+  private: what people type there is never recorded, and how they type there is the signal. Use `data-private` only
+  where even typing rhythm is sensitive, such as a PIN pad.
 - Add `.orion/` to `.gitignore`: it holds pulled telemetry and labels.
 
 ## Phase 1: today
