@@ -16,10 +16,11 @@ PostHog's own data.
    ```sh
    orion search --label frustrated --page /checkout --last 30d          # sessions, plus pages ranked by share
    orion search --label frustrated --last 30d --json > frustrated.json
+   orion search --label frustrated --cohort "Paying customers"         # one PostHog cohort, by name or id
    orion context <session_id>                                           # one session's labels and evidence
    ```
    `share` is the fraction of labelled sessions on that page that carried the label. Compare shares, not raw counts.
-   Busy pages have more of every label.
+   Busy pages have more of every label. Run the same search per cohort to compare groups of people.
 3. **Hypotheses.** Write each as a testable statement about behaviour or product events, e.g. "frustration rises
    after a coupon error". Use PostHog (SQL, funnels, the PostHog MCP if available) to pull the events around the labelled moments.
 4. **Experiments.** Compare labelled and unlabelled sessions on the same page and period. Check whether the pattern

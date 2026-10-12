@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { extname } from 'node:path';
 const publicFiles = new Set([
   '/examples/index.html', '/examples/sdk-test.html', '/src/index.js', '/src/capture.js', '/src/features.js', '/src/model.js',
-  '/src/live.js', '/src/sequence.js', '/src/analysis.js', '/src/codec.js', '/dist/orion.js', '/dist/orion.js.map', '/node_modules/posthog-js/dist/array.js',
+  '/src/live.js', '/src/sequence.js', '/src/mood.js', '/src/survey.js', '/src/analysis.js', '/src/codec.js', '/dist/orion.js', '/dist/orion.js.map', '/node_modules/posthog-js/dist/array.js',
   '/test/fixtures/clicky-model.json',
 ]);
 export function serve(port = 4173) {

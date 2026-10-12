@@ -183,6 +183,60 @@ try {
   await livePage.close();
   assert.deepEqual(errors, []);
 
+  // Self-report: the question appears while the page is in use, its answer reaches PostHog with the recorder and the
+  // moment it was shown, and pointing at or clicking the question never becomes telemetry. Mood runs alongside.
+  const reportPage = await browser.newPage();
+  reportPage.on('pageerror', error => errors.push(error.message));
+  const reportBodies = [];
+  await reportPage.route('**/ingest/**', async route => {
+    reportBodies.push(route.request().postData() ?? '');
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"status":1}' });
+  });
+  await reportPage.goto(`${url}/examples/sdk-test.html`);
+  await reportPage.addScriptTag({ content: sdkScript });
+  await reportPage.evaluate(async () => {
+    await new Promise(resolve => posthog.init('phc_local_test_only', { api_host: `${location.origin}/ingest`, persistence: 'memory', autocapture: false,
+      capture_pageview: false, capture_pageleave: false, disable_session_recording: true, advanced_disable_flags: true,
+      opt_out_useragent_filter: true, disable_compression: true, request_batching: false, loaded: resolve }));
+    window.orionOptions = { mood: true, selfReport: { afterMs: 1500,
+      survey: { format: 'orion-survey', table: { '*': { '*': ['calm', 'engaged', 'frustrated', 'confused'] } } } } };
+  });
+  await reportPage.addScriptTag({ url: `${url}/dist/orion.js` });
+  await reportPage.waitForFunction(() => window.orion?.mood);
+  for (let i = 0; i < 60 && !(await reportPage.$('[data-orion-self-report]')); i++) {
+    await reportPage.mouse.move(100 + (i % 10) * 20, 80 + (i % 3) * 10, { steps: 5 });
+    await reportPage.waitForTimeout(100);
+  }
+  assert.ok(await reportPage.$('[data-orion-self-report]'), 'The self-report question did not appear');
+  const offered = await reportPage.evaluate(() => [...document.querySelector('[data-orion-self-report]').shadowRoot.querySelectorAll('button[data-answer]')].map(b => b.dataset.answer));
+  assert.deepEqual([...offered].sort(), ['calm', 'confused', 'engaged', 'frustrated']);
+  const excludedBefore = await reportPage.evaluate(() => orion.getStats().excluded);
+  const choice = await reportPage.evaluateHandle(() => document.querySelector('[data-orion-self-report]').shadowRoot.querySelector('button[data-answer="frustrated"]'));
+  await choice.asElement().click();
+  await reportPage.waitForFunction(() => !document.querySelector('[data-orion-self-report]'), null, { timeout: 4000 });
+  await reportPage.mouse.move(300, 120, { steps: 10 });
+  await reportPage.evaluate(() => orion.flush());
+  const reportEvents = name => reportBodies.map(decode).filter(b => b.includes(name)).flatMap(transportEvents).filter(e => e.event === name);
+  for (let i = 0; i < 30 && !reportEvents('orion_self_report').length; i++) await reportPage.waitForTimeout(100);
+  const answer = reportEvents('orion_self_report').at(-1)?.properties;
+  assert.ok(answer, 'No orion_self_report event reached the SDK transport');
+  assert.equal(answer.answer, 'frustrated');
+  assert.equal(answer.dismissed, false);
+  assert.equal(answer.ranked_by, 'survey');
+  assert.deepEqual(answer.options, offered);
+  assert.deepEqual([answer.positive, answer.negative], [['calm', 'engaged'], ['frustrated', 'confused']]);
+  assert.ok(answer.answered_t > answer.shown_t && typeof answer.mood === 'string');
+  const reportBursts = reportEvents('orion_input').map(e => e.properties);
+  assert.ok(reportBursts.length && reportBursts.every(b => b.recorder_id === answer.recorder_id), 'The answer names the recorder whose input it labels');
+  const pressesOnQuestion = reportBursts.flatMap(b => decodeRecords(b))
+    .filter(r => r.kind.startsWith('pointer') && r.kind !== 'pointermove' && r.t >= answer.shown_t && r.t <= answer.answered_t + 100);
+  assert.deepEqual(pressesOnQuestion, [], 'Clicking the question must not become telemetry');
+  assert.ok(await reportPage.evaluate(() => orion.getStats().excluded) > excludedBefore);
+  assert.ok(reportEvents('orion_session_start').some(e => e.properties.mood === true && e.properties.self_report === true));
+  assert.ok(await reportPage.evaluate(() => JSON.parse(localStorage.getItem('orion-self-report')).at > 0), 'The answer starts the cooldown');
+  await reportPage.close();
+  assert.deepEqual(errors, []);
+
   // Exercise the actual DOM listener at synthetic 120/1000/8000 Hz timestamps.
   // CPU time here is a dispatch stress test, never a hardware sampling claim.
   await page.goto(url); await page.waitForFunction(() => window.recorder);
@@ -241,5 +295,5 @@ try {
     console.log(JSON.stringify({ crowdcast: 'passed', clock: trace.clock, preservedEvents: expected.length, syntheticFixture: true }));
   }
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ browser: await browser.version(), sdkVersion, checks: 'trusted input, pointer down/up, shadow password exclusion, real PostHog SDK payload and identity, script-tag auto-start, official snippet install, live labels from a served model, SDK rate-limit isolation, transport batching, private fixture isolation', status: 'passed' }));
+  console.log(JSON.stringify({ browser: await browser.version(), sdkVersion, checks: 'trusted input, pointer down/up, shadow password exclusion, real PostHog SDK payload and identity, script-tag auto-start, official snippet install, live labels from a served model, self-report question and mood reading, SDK rate-limit isolation, transport batching, private fixture isolation', status: 'passed' }));
 } finally { await browser?.close(); await new Promise(resolve => server.close(resolve)); }

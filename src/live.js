@@ -3,9 +3,11 @@
 // `orion_label` events (for replays, search and webhooks) and to the page through context()/onLabel().
 import { createNormalizer, extractFeatures } from './features.js';
 import { predict, predictSteps, evidence, validateModel } from './model.js';
-import { encodeSteps } from './sequence.js';
+import { encodeSteps, CHANNELS } from './sequence.js';
+import { MOOD_SPEC, createMood, moodEvidence } from './mood.js';
 
 export const LABEL_EVENT = 'orion_label';
+export const MOOD_MODEL = 'orion:mood';
 
 export function createLive({ win, posthog, permitted, every = 2000, heartbeat = 60000, confirm = 2, history = 8, send = true, fetchJson, fetchBytes, ort }) {
   if (!Number.isInteger(every) || every < 250) throw new RangeError('Invalid live interval');
@@ -13,9 +15,11 @@ export function createLive({ win, posthog, permitted, every = 2000, heartbeat = 
   const listeners = new Set();
   const stats = { ticks: 0, scored: 0, noRead: 0, labelsSent: 0, errors: 0 };
   let normalize = createNormalizer();
-  let rows = [], gaps = [], ordinal = 0, previousEnd = null, horizon = 0, timer, stopped = false;
+  let rows = [], gaps = [], ordinal = 0, previousEnd = null, horizon = 0, timer, moodTimer, stopped = false, lastInput = -Infinity;
 
   function record(row) {
+    if (row.kind !== 'boundary') lastInput = Math.max(lastInput, row.t);
+    for (const m of models.values()) m.mood?.record(row);
     const clean = normalize(row);
     clean.ordinal = ordinal++;
     if (row.kind === 'boundary') gaps.push([Math.min(previousEnd ?? row.t, row.t), row.t]);
@@ -26,7 +30,10 @@ export function createLive({ win, posthog, permitted, every = 2000, heartbeat = 
     normalize = createNormalizer();
     rows = []; gaps = []; previousEnd = null;
     // Discards happen on consent loss, pause and session/person changes: labels must not carry over.
-    for (const m of models.values()) Object.assign(m, { label: undefined, since: 0, earlier: [], evidence: [], pending: null, streak: 0, lastSent: 0 });
+    for (const m of models.values()) {
+      Object.assign(m, { label: undefined, since: 0, earlier: [], evidence: [], pending: null, streak: 0, lastSent: 0, sentLabel: undefined, sentAt: -Infinity });
+      m.mood?.reset();
+    }
   }
   function prune(now) {
     const cutoff = now - horizon - 1000;
@@ -60,7 +67,8 @@ export function createLive({ win, posthog, permitted, every = 2000, heartbeat = 
   function emit(m, changed) {
     const ctx = snapshot(m);
     m.lastSent = Date.now();
-    if (send) {
+    m.sentLabel = m.label;
+    if (send && !m.local) {
       try {
         const props = { model: ctx.model, model_version: ctx.version, target: ctx.target, label: ctx.label,
           confidence: ctx.confidence, probabilities: ctx.probabilities, evidence: ctx.evidence, since: ctx.since,
@@ -68,7 +76,39 @@ export function createLive({ win, posthog, permitted, every = 2000, heartbeat = 
         if (posthog.capture(LABEL_EVENT, props) !== undefined || typeof posthog.__loaded !== 'boolean') stats.labelsSent++;
       } catch { stats.errors++; }
     }
-    if (changed) for (const fn of listeners) { try { fn(ctx); } catch { stats.errors++; } }
+    if (changed && !m.local) for (const fn of listeners) { try { fn(ctx); } catch { stats.errors++; } }
+  }
+
+  // The built-in mood reading updates every 100 ms like the demo. A new mood reaches PostHog and onLabel once it has
+  // held for `hold` ms; the heartbeat repeats it only while there is input. Timing uses the page clock, as input does.
+  function moodTick() {
+    if (stopped || win.document?.hidden || !permitted()) return;
+    const now = win.performance.now();
+    for (const m of models.values()) {
+      if (!m.mood) continue;
+      const state = m.mood.update(now);
+      if (state.mood !== m.label) {
+        if (m.label !== undefined) { m.earlier.push(m.label); if (m.earlier.length > history) m.earlier.shift(); }
+        m.label = state.mood; m.since = Date.now(); m.changedAt = now;
+      }
+      m.confidence = Math.round(state.confidence * 1000) / 1000;
+      m.probabilities = Object.fromEntries(Object.entries(state.probabilities).map(([k, v]) => [k, Math.round(v * 1000) / 1000]));
+      m.evidence = moodEvidence(state.features);
+      m.updated = Date.now();
+      const changed = m.label !== m.sentLabel;
+      if (changed ? now - m.changedAt >= m.hold : now - m.sentAt >= heartbeat && lastInput > m.sentAt) {
+        m.sentAt = now;
+        emit(m, changed);
+      }
+    }
+  }
+  function loadMood({ local = false, hold = 2000, agents = [] } = {}) {
+    const existing = models.get(MOOD_SPEC.name);
+    if (existing) { existing.local = existing.local && local; return MOOD_SPEC.name; }
+    models.set(MOOD_SPEC.name, { spec: { ...MOOD_SPEC, agents }, mood: createMood(), local, hold, label: undefined, since: 0, earlier: [],
+      evidence: [], pending: null, streak: 0, lastSent: 0, sentLabel: undefined, changedAt: 0, sentAt: -Infinity, updated: 0, noRead: null });
+    if (moodTimer === undefined && !stopped) moodTimer = win.setInterval(moodTick, 100);
+    return MOOD_SPEC.name;
   }
 
   async function score(m, now) {
@@ -79,7 +119,7 @@ export function createLive({ win, posthog, permitted, every = 2000, heartbeat = 
     if (m.session) {
       const e = m.spec.estimator;
       const relative = w.events.map(r => ({ ...r, t: r.t - w.context.start_ms }));
-      result = await predictSteps(m.spec, m.session, m.ort, encodeSteps(relative, m.spec.window.size_ms, e.steps, e.step_ms));
+      result = await predictSteps(m.spec, m.session, m.ort, encodeSteps(relative, m.spec.window.size_ms, e.steps, e.step_ms, e.channels ?? CHANNELS));
       if (stopped) return;
     } else result = predict(m.spec, features);
     stats.scored++;
@@ -117,7 +157,7 @@ export function createLive({ win, posthog, permitted, every = 2000, heartbeat = 
     prune(now);
     if (!permitted()) return Promise.resolve();
     return Promise.all([...models.values()].map(async m => {
-      if (m.busy) return; // A slow sequence model skips a tick rather than queueing work.
+      if (m.busy || m.mood) return; // A slow sequence model skips a tick rather than queueing work.
       m.busy = !!m.session; // Tabular models finish synchronously, inside this call.
       try { await score(m, now); } catch { stats.errors++; } finally { m.busy = false; }
     }));
@@ -134,6 +174,7 @@ export function createLive({ win, posthog, permitted, every = 2000, heartbeat = 
   }
 
   async function load(source, options = {}) {
+    if (source === MOOD_MODEL) return loadMood(options);
     const spec = validateModel(typeof source === 'string' ? await fetchJson(source) : source);
     const session = spec.estimator.kind === 'onnx' ? await sessionFor(spec, source, options) : null;
     if (spec.window.align && spec.window.align !== 'past') {
@@ -141,15 +182,16 @@ export function createLive({ win, posthog, permitted, every = 2000, heartbeat = 
       console.warn(`[orion] ${spec.name} was trained on ${spec.window.align} windows; live scoring uses the most recent ${spec.window.size_ms} ms`);
     }
     models.set(spec.name, { spec, session, ort: options.ort ?? ort, busy: false, label: undefined, since: 0, earlier: [], evidence: [], pending: null, streak: 0, lastSent: 0, updated: 0, noRead: null });
-    horizon = Math.max(...[...models.values()].map(m => m.spec.window.size_ms));
+    horizon = Math.max(...[...models.values()].filter(m => !m.mood).map(m => m.spec.window.size_ms));
     if (timer === undefined && !stopped) timer = win.setInterval(tick, every);
     return spec.name;
   }
 
+  // Without a name: the first trained model with a label, then the built-in mood reading.
   function pick(name) {
-    if (name !== undefined) return models.get(name);
-    for (const m of models.values()) if (m.label !== undefined) return m;
-    return undefined;
+    if (name !== undefined) { const m = models.get(name); return m?.local ? undefined : m; }
+    const ready = [...models.values()].filter(m => m.label !== undefined && !m.local);
+    return ready.find(m => !m.mood) ?? ready[0];
   }
 
   return {
@@ -167,9 +209,14 @@ export function createLive({ win, posthog, permitted, every = 2000, heartbeat = 
       if (c.replay_url) lines.push(`  replay: ${c.replay_url}`);
       return lines.join('\n');
     },
-    labels() { return [...models.values()].map(snapshot).filter(Boolean); },
+    labels() { return [...models.values()].filter(m => !m.local).map(snapshot).filter(Boolean); },
+    /** The built-in mood reading right now (also when it only runs locally for the self-report question). */
+    mood() {
+      const m = models.get(MOOD_SPEC.name);
+      return m?.label === undefined ? null : { mood: m.label, confidence: m.confidence, probabilities: m.probabilities, since: new Date(m.since).toISOString() };
+    },
     onLabel(fn) { listeners.add(fn); return () => listeners.delete(fn); },
-    stats() { return { ...stats, models: [...models.keys()], buffered: rows.length, noReadReasons: Object.fromEntries([...models].map(([k, m]) => [k, m.noRead])) }; },
-    stop() { stopped = true; win.clearInterval(timer); timer = undefined; listeners.clear(); reset(); },
+    stats() { return { ...stats, models: [...models.keys()].filter(k => !models.get(k).local), buffered: rows.length, noReadReasons: Object.fromEntries([...models].map(([k, m]) => [k, m.noRead])) }; },
+    stop() { stopped = true; win.clearInterval(timer); win.clearInterval(moodTimer); timer = moodTimer = undefined; listeners.clear(); reset(); },
   };
 }

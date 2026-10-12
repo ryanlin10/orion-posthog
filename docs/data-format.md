@@ -85,7 +85,7 @@ Quality counters describe recorder-local observations before the current capture
 
 ## orion_session_start
 
-`orion_version`, `schema_version`, `mask`, `pointer_source` and `models` (the model URLs or names given to `connect`).
+`orion_version`, `schema_version`, `mask`, `pointer_source`, `models` (the model URLs or names given to `connect`), and `mood` and `self_report` (whether the built-in mood reading and the question are on).
 
 ## orion_label
 
@@ -105,3 +105,24 @@ Sent when a live label changes (after it wins `confirm` consecutive scores, two 
 | `changed` | true when the label changed, false for the heartbeat |
 
 Live scoring follows the training rules: a window is scored only if it has at least `min_events` input records and, unless the recipe allowed gaps, no capture gap. Without a score the label stays as it was; consent loss, pause and session or person changes clear it.
+
+The built-in mood reading (`mood: true`) sends the same event with `model: "orion-mood"`, `model_version: 1`, `target: "mood"` and a label from `angry`, `frustrated`, `calm`, `anxious`, `confused` and `pleased`. It updates every 100 ms from the last two seconds of pointer movement and four seconds of presses; a new mood is sent once it has held for 2 seconds, and the heartbeat repeats it only while there is input. Its `evidence` gives pointer speed, turns per second and clicks per second.
+
+## orion_self_report
+
+Sent when someone answers or closes the question (`selfReport`). The SDK adds `$session_id`, `$pathname` and identity.
+
+| Property | Meaning |
+| --- | --- |
+| `answer` | The chosen answer, or null when the question was closed |
+| `dismissed` | true when closed without an answer |
+| `question` | The question shown |
+| `options` | The four answers in the order shown (shuffled) |
+| `positive`, `negative` | The two positive and two negative answers, most relevant first |
+| `ranked_by` | `survey` (a file from `orion survey`), `custom` (your `rank` function), `mood` or `default` |
+| `trigger` | `time`, `mood` or `manual` |
+| `recorder_id` | The recorder whose input the answer labels, as in `orion_input` |
+| `shown_t`, `answered_t` | Recorder times (the same clock as input records) when the question appeared and was answered |
+| `mood`, `mood_probabilities` | The built-in mood reading when the question appeared |
+
+The self-report labeller labels `[shown_t - window length, shown_t)`: the input before the question appeared. Input on the question itself is never captured (its host element carries `data-ph-behavior-ignore`).

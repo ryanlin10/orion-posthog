@@ -65,7 +65,18 @@ def context_text(ctx):
     return "\n".join(lines)
 
 
-def _filters(label, page, model):
+def find_cohort(client, cohort):
+    """A cohort by id or exact name, as {"id", "name"}."""
+    found = client.request("GET", client.project_path("cohorts/?limit=500")).get("results", [])
+    text = str(cohort).strip()
+    matches = [c for c in found if (text.isdigit() and int(text) == c.get("id")) or c.get("name") == text]
+    if len(matches) != 1:
+        names = ", ".join(f"{c.get('name')} ({c.get('id')})" for c in found[:20])
+        raise ValueError(f"Found {len(matches)} cohorts matching {text!r}" + (f"; cohorts: {names}" if names else ""))
+    return {"id": int(matches[0]["id"]), "name": matches[0].get("name")}
+
+
+def _filters(label, page, model, cohort_id=None):
     clauses, values = ["event = 'orion_label'", "timestamp > now() - toIntervalDay({days})"], {}
     if label is not None:
         clauses.append("toString(properties.label) = {label}")
@@ -76,21 +87,26 @@ def _filters(label, page, model):
     if page:
         clauses.append("properties.$pathname LIKE {page}")
         values["page"] = page.replace("%", "\\%").replace("_", "\\_") + "%"
+    if cohort_id is not None:
+        clauses.append(f"person_id IN COHORT {int(cohort_id)}")  # HogQL's cohort test; the id is a checked integer.
     return " AND ".join(clauses), values
 
 
-def search(client, label=None, page=None, last_days=30, model=None, limit=100):
-    """Sessions that carried a label, and the pages where it shows up most often relative to all labelled sessions."""
+def search(client, label=None, page=None, last_days=30, model=None, limit=100, cohort=None):
+    """Sessions that carried a label, and the pages where it shows up most often relative to all labelled sessions.
+    With a cohort, both count only that cohort's people."""
     if not isinstance(last_days, int) or not 1 <= last_days <= 365:
         raise ValueError("last must be between 1 and 365 days")
     limit = max(1, min(int(limit), 1000))
-    where, values = _filters(label, page, model)
+    group = find_cohort(client, cohort) if cohort is not None else None
+    cohort_id = group["id"] if group else None
+    where, values = _filters(label, page, model, cohort_id)
     values["days"] = last_days
     sessions = client.query(f"""
         SELECT properties.$session_id AS session_id, min(timestamp) AS first_seen, max(timestamp) AS last_seen, count() AS labels,
                groupUniqArray(properties.$pathname) AS pages, max(toFloat(properties.confidence)) AS max_confidence
         FROM events WHERE {where} GROUP BY session_id ORDER BY first_seen DESC LIMIT {limit}""", values, name="orion search sessions")
-    labelled_where, labelled_values = _filters(None, page, model)
+    labelled_where, labelled_values = _filters(None, page, model, cohort_id)
     labelled_values["days"] = last_days
     by_page = client.query(f"""
         SELECT properties.$pathname AS page, count(DISTINCT properties.$session_id) AS sessions
@@ -103,7 +119,7 @@ def search(client, label=None, page=None, last_days=30, model=None, limit=100):
     for s in sessions:
         s["pages"] = _json(s["pages"]) or []
         s["replay_url"] = client.replay_url(s["session_id"])
-    return {"label": label, "page": page, "last_days": last_days, "model": model, "sessions": sessions, "pages": pages}
+    return {"label": label, "page": page, "last_days": last_days, "model": model, "cohort": group, "sessions": sessions, "pages": pages}
 
 
 def parse_days(text):

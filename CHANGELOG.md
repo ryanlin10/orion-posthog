@@ -1,6 +1,20 @@
 # Changelog
 
-## Orion 0.1.0 (unreleased)
+## Orion 0.3.0 (unreleased)
+
+Numbered after the recorder's 0.1.0 and 0.2.0 releases in this repository.
+
+- Built-in mood reading (`mood: true`): angry, frustrated, calm, anxious, confused or pleased from pointer speed, changes in direction and clicks, with the same heuristics as the demo on paradigmmachines.ai/orion. Labels go to `context()`, `onLabel()` and PostHog as model `orion-mood`; `orion.mood()` reads it.
+- Self-report (`selfReport`): a question in the corner of the page asks how it is going, with two positive and two negative answers picked for the page and the visitor's recent input, and sends `orion_self_report`. Answers become `self_report` labels for the input before the question; they win over every other labeller. `orion.ask()` asks now.
+- `orion survey <recipe>`: Jev (TypeSafe) ranks the answers for each page and mood ahead of time into a survey file that `orion deploy` ships; without a TypeSafe key the AI labeller's model ranks them.
+- `orion init` asks for and checks the PostHog key and project, the AI labeller (Anthropic, OpenAI or Gemini) and its key, and a TypeSafe key; keys live in `~/.config/orion/keys.env` (mode 600). The AI labellers run on any of the three providers.
+- `orion search --cohort <name or id>`.
+- Sequence models read only the channels of the recipe's telemetry families (they used every channel before). Reports include the training and validation loss curve.
+- `orion deploy` writes to `public/orion` unless told otherwise and prints a snippet that loads `https://cdn.paradigmmachines.ai/orion@0.3.0/orion.js`.
+- Recipes accept `temporal_cnn` for `tcn`, and session alongside user or day in `split.by` (it adds nothing there). An unset `labels.model.llm` uses the model chosen at `orion init`.
+- Fixes: `Orion(posthog_project="<name>")` looks the project up without a project id set; a 400 from an AI provider fails that request instead of the whole labelling run.
+
+## Orion 0.1.0
 
 Orion grows out of posthog-behavioral-recorder 0.2.0 (history kept). Package names: `@paradigmmachines/orion` (npm) and `paradigm-orion` (PyPI, `orion` command).
 

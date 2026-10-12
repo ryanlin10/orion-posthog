@@ -2,14 +2,14 @@
 
 A label is an interval of one recorder's time (`timebase: recorder_ms`, half-open [start_ms, end_ms)) with a
 source, a version naming the labeller and model, a confidence and the target value. When labellers disagree
-about overlapping time, human labels win, then text labels, then replay labels.
+about overlapping time, people's own answers win, then human labellers, then text labels, then replay labels.
 """
 import hashlib
 import json
 
 from .workspace import read_jsonl, write_jsonl
 
-PRIORITY = {"human": 0, "text": 1, "replay": 2}
+PRIORITY = {"self_report": 0, "human": 1, "text": 2, "replay": 3}
 
 
 def describe_target(target):
@@ -75,4 +75,4 @@ def merge(label_lists):
 
 
 def load_all(workspace, recipe):
-    return {name: read_jsonl(label_path(workspace, recipe, name)) for name in ("human", "text", "replay")}
+    return {name: read_jsonl(label_path(workspace, recipe, name)) for name in PRIORITY}

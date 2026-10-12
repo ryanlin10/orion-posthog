@@ -1,10 +1,12 @@
-"""The .orion/ folder in a project: pulled data, labels, datasets and versioned models. No secrets are stored."""
+"""The .orion/ folder in a project: pulled data, labels, datasets, versioned models and non-secret settings.
+No secrets are stored here: keys live in the environment or in the keys file outside the project (credentials.py)."""
 import json
 import os
 import re
 from pathlib import Path
 
-CONFIG_KEYS = {"posthog_host", "posthog_project", "posthog_ui_host"}
+# llm_model is the AI labellers' model, e.g. "gpt-5.6-sol" or "openai:gpt-5.6-sol"; a recipe's own llm wins.
+CONFIG_KEYS = {"posthog_host", "posthog_project", "posthog_ui_host", "llm_model"}
 
 
 class Workspace:

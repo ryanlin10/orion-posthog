@@ -6,11 +6,12 @@ for agents. Everything runs on your machine and in your visitors' browsers; noth
     clf = orion.train("recipes/checkout-sentiment.yaml")
     clf.deploy(out="public/orion", context=["support-agent"])
     orion.context("<session id>")
+    orion.search(label="frustrated", page="/checkout", cohort="Paying customers")
 """
 import json
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
 
 class Classifier:
@@ -80,8 +81,13 @@ class Orion:
 
     def build(self, recipe, relabel=False):
         from .build import build
+        from .llm import LLMSetupError
         r = self.recipe(recipe)
-        return build(self.store, r, self.llm(r), relabel, self.log)
+        try:
+            llm = self.llm(r)
+        except LLMSetupError:
+            llm = None  # Saved AI labels need no key; the build says so if it has to ask for new ones.
+        return build(self.store, r, llm, relabel, self.log)
 
     def train(self, recipe, architecture=None, evaluate_test=False, rebuild=True, shuffles=None):
         from .train import train
@@ -95,6 +101,25 @@ class Orion:
         ctx = context(self.posthog, session_id, agent)
         return context_text(ctx) if text else ctx
 
-    def search(self, label=None, page=None, last="30d", model=None, limit=100):
+    def search(self, label=None, page=None, last="30d", model=None, limit=100, cohort=None):
         from .agents import parse_days, search
-        return search(self.posthog, label, page, parse_days(last), model, limit)
+        return search(self.posthog, label, page, parse_days(last), model, limit, cohort)
+
+    def survey(self, recipe, pages=20, out=None):
+        """Rank the self-report answers for each page and mood (Jev when a TypeSafe key is saved, else the AI
+        labeller's model) and save the survey file orion.js reads; with `out`, also copy it there."""
+        from .credentials import get
+        from .jev import Jev
+        from .llm import make_client
+        from .survey import build_survey, save_survey
+        r = self.recipe(recipe)
+        jev = Jev(self.workspace) if get("TYPESAFE_API_KEY") else None
+        llm = None if jev else make_client(r["labels"]["model"]["llm"], self.workspace, self._llm)
+        survey = build_survey(self.store, r, jev, llm, pages, self.log)
+        path = save_survey(self.workspace, survey)
+        if out is not None:
+            target = Path(out) / f"{r['name']}-survey.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(survey, separators=(",", ":")))
+            path = target
+        return survey, path

@@ -2,18 +2,33 @@
 // the window is cut into fixed steps (100 ms by default), most recent at the end, each with 14 channels.
 export const CHANNELS = ['moves', 'path', 'peak_speed', 'turning', 'pointer_downs', 'pointer_ups', 'click_hold', 'key_downs', 'key_ups',
   'key_hold', 'wheel', 'focus_changes', 'gap', 'active'];
+// The telemetry family behind each channel; capture gaps and activity belong to every recipe.
+export const CHANNEL_FAMILY = { moves: 'pointer', path: 'pointer', peak_speed: 'pointer', turning: 'pointer', pointer_downs: 'pointer',
+  pointer_ups: 'pointer', click_hold: 'pointer', key_downs: 'keyboard', key_ups: 'keyboard', key_hold: 'keyboard',
+  wheel: 'scroll', focus_changes: 'focus', gap: null, active: null };
+const KIND_FAMILY = { pointermove: 'pointer', pointerdown: 'pointer', pointerup: 'pointer', pointercancel: 'pointer', click: 'pointer',
+  dblclick: 'pointer', contextmenu: 'pointer', keydown: 'keyboard', keyup: 'keyboard', wheel: 'scroll', scroll: 'scroll',
+  focusin: 'focus', focusout: 'focus' };
 
-/** events: normalized rows sorted by t, with t relative to the window start. Returns Float32Array(steps × 14). */
-export function encodeSteps(events, durationMs, steps, stepMs) {
+/** The channels a recipe's telemetry families keep. */
+export const channelsFor = families => CHANNELS.filter(c => CHANNEL_FAMILY[c] === null || families.includes(CHANNEL_FAMILY[c]));
+
+/**
+ * events: normalized rows sorted by t, with t relative to the window start. Returns Float32Array(steps × channels).
+ * Input from families without a channel is skipped entirely, so it does not show up in `active` either.
+ */
+export function encodeSteps(events, durationMs, steps, stepMs, channels = CHANNELS) {
   const C = CHANNELS.length;
   const out = new Float32Array(steps * C);
   const path = new Float64Array(steps), peak = new Float64Array(steps), turn = new Float64Array(steps);
   const clickHold = new Float64Array(steps), keyHold = new Float64Array(steps);
   const offset = steps * stepMs - durationMs; // Shorter windows sit at the end; earlier steps stay empty.
+  const kept = new Set(channels.map(c => CHANNEL_FAMILY[c]));
   let pointers = new Map(), keys = new Map(), clicks = new Map();
   for (const row of events) {
     const i = Math.floor((row.t + offset) / stepMs);
-    if (i < 0 || i >= steps) continue;
+    const family = KIND_FAMILY[row.kind];
+    if (i < 0 || i >= steps || (family && !kept.has(family))) continue;
     const base = i * C;
     out[base + 13] = 1;
     switch (row.kind) {
@@ -65,5 +80,9 @@ export function encodeSteps(events, durationMs, steps, stepMs) {
     out[base + 1] = Math.log1p(path[i]); out[base + 2] = Math.log1p(peak[i]); out[base + 3] = Math.log1p(turn[i]);
     out[base + 6] = Math.log1p(clickHold[i]); out[base + 9] = Math.log1p(keyHold[i]);
   }
-  return out;
+  if (channels.length === C && channels.every((c, j) => c === CHANNELS[j])) return out;
+  const pick = channels.map(c => CHANNELS.indexOf(c));
+  const selected = new Float32Array(steps * pick.length);
+  for (let i = 0; i < steps; i++) pick.forEach((j, k) => { selected[i * pick.length + k] = out[i * C + j]; });
+  return selected;
 }

@@ -19,6 +19,7 @@ class FakePostHog:
     def __init__(self, rows, project="1", key="phx_test"):
         self.rows, self.project, self.key = rows, project, key
         self.labels = []  # orion_label events, for context and search queries.
+        self.cohorts = {}  # cohort id → {"name": ..., "people": set of person ids}
         self.runs, self.requests, self.signed_with_auth = {}, [], 0
         fake = self
 
@@ -56,6 +57,8 @@ class FakePostHog:
                     if run["polls"] < 2:
                         return self.reply(200, {"id": m.group(1), "status": "Running"})
                     return self.reply(200, {"id": m.group(1), "status": "Completed", "files": [{"id": f"f{i}"} for i in range(len(run["files"]))]})
+                if path == f"/api/projects/{fake.project}/cohorts/":
+                    return self.reply(200, {"results": [{"id": i, "name": c["name"]} for i, c in fake.cohorts.items()]})
                 m = re.fullmatch(rf"/api/projects/{fake.project}/file_download_batch_exports/(\w+)/download/(\d+)/", path)
                 if m:
                     return self.reply(302, raw=b"", headers={"Location": f"/signed/{m.group(1)}-{m.group(2)}?sig=abc"})
@@ -108,7 +111,10 @@ class FakePostHog:
                                                   l["properties"]["label"], l["properties"]["confidence"], json.dumps(l["properties"]["evidence"]),
                                                   l["properties"]["since"], l["properties"].get("$pathname"), json.dumps(l["properties"].get("agents", []))]
                                                  for l in rows]}
-        matched = [l for l in self.labels if ("label" not in values or str(l["properties"]["label"]) == values["label"])
+        cohort = re.search(r"person_id IN COHORT (\d+)", body["query"]["query"])
+        people = self.cohorts[int(cohort.group(1))]["people"] if cohort else None
+        in_scope = [l for l in self.labels if people is None or l.get("person_id") in people]
+        matched = [l for l in in_scope if ("label" not in values or str(l["properties"]["label"]) == values["label"])
                    and ("page" not in values or str(l["properties"].get("$pathname", "")).startswith(values["page"].rstrip("%")))]
         if name == "orion search sessions":
             sessions = {}
@@ -123,7 +129,7 @@ class FakePostHog:
             cols = ["session_id", "first_seen", "last_seen", "labels", "pages", "max_confidence"]
             return {"columns": cols, "results": [[s[c] for c in cols] for s in sessions.values()]}
         if name in ("orion search pages", "orion search totals"):
-            source = matched if name == "orion search pages" else [l for l in self.labels if "page" not in values or
+            source = matched if name == "orion search pages" else [l for l in in_scope if "page" not in values or
                                                                      str(l["properties"].get("$pathname", "")).startswith(values["page"].rstrip("%"))]
             pages = {}
             for l in source:

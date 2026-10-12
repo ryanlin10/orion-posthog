@@ -7,11 +7,8 @@ from . import Orion, __version__
 
 
 def cmd_init(args):
-    from .workspace import Workspace
-    ws = Workspace()
-    stored = ws.save_config(posthog_host=args.host, posthog_project=args.project, posthog_ui_host=args.ui_host)
-    print(f"Saved {ws.path('config.json')}: {json.dumps(stored)}")
-    print("Keys stay in your environment: POSTHOG_PERSONAL_API_KEY, and ANTHROPIC_API_KEY for the AI labellers.")
+    from .onboarding import init
+    init(args)
 
 
 def cmd_pull(args):
@@ -39,6 +36,12 @@ def cmd_label(args):
             print(f"\nSaved {session.state()['done']} labels to {session.path}")
         return
     from .labels import save_labels
+    if args.labeller == "self_report":
+        from .labellers.self_report import label_self_report
+        labels, stats = label_self_report(o.store, recipe)
+        save_labels(o.workspace, recipe, "self_report", labels)
+        print(f"self-report labels: {json.dumps(stats)}")
+        return
     llm = o.llm({**recipe, "labels": {**recipe["labels"], "by": ["model"]}})
     if args.labeller == "text":
         from .labellers.text import label_text as run
@@ -68,17 +71,26 @@ def cmd_deploy(args):
     print("\nAdd to your site after PostHog:\n\n" + snippet)
 
 
+def cmd_survey(args):
+    o = Orion()
+    survey, path = o.survey(args.recipe, args.pages, args.out)
+    print(f"Ranked the answers to “{survey['question']}” for {len(survey['table'])} pages with {survey['ranked_by']}: {path}")
+    if args.out:
+        url = f"{args.url_prefix.rstrip('/')}/{path.name}"
+        print(f"\nAdd to orionOptions on your site:\n\n  selfReport: {{ survey: '{url}' }}")
+
+
 def cmd_context(args):
     o = Orion()
     print(json.dumps(o.context(args.session, args.agent), indent=2, default=str) if args.json else o.context(args.session, args.agent, text=True))
 
 
 def cmd_search(args):
-    result = Orion().search(args.label, args.page, args.last, args.model, args.limit)
+    result = Orion().search(args.label, args.page, args.last, args.model, args.limit, args.cohort)
     if args.json:
         print(json.dumps(result, indent=2, default=str))
         return
-    where = f" on {args.page}" if args.page else ""
+    where = (f" on {args.page}" if args.page else "") + (f" in cohort {result['cohort']['name']}" if result.get("cohort") else "")
     print(f"{len(result['sessions'])} sessions labelled {args.label or 'anything'}{where} in the last {result['last_days']} days")
     for p in result["pages"][:10]:
         share = f" ({p['share']:.0%} of labelled sessions there)" if p["share"] is not None else ""
@@ -109,10 +121,13 @@ def main(argv=None):
     p.add_argument("--version", action="version", version=f"orion {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
-    s = sub.add_parser("init", help="Save the PostHog host and project for this folder")
+    s = sub.add_parser("init", help="Set up this folder: PostHog host, key and project, the AI labeller and its key")
     s.add_argument("--host", help="PostHog app host, e.g. https://us.posthog.com or https://eu.posthog.com")
     s.add_argument("--project", help="PostHog project id")
     s.add_argument("--ui-host", help="Host for replay links if it differs from --host")
+    s.add_argument("--llm", help="AI labeller: a provider (anthropic, openai, gemini) or a model, e.g. gpt-5.6-sol")
+    s.add_argument("--no-input", action="store_true", help="Ask nothing; save the flags as given")
+    s.add_argument("--no-check", action="store_true", help="Do not check the keys with PostHog or the AI provider")
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("pull", help="Export Orion telemetry and the events around it from PostHog")
@@ -123,8 +138,8 @@ def main(argv=None):
     s.add_argument("--text-event", action="append", help="With --file: event names whose text the text labeller reads")
     s.set_defaults(fn=cmd_pull)
 
-    s = sub.add_parser("label", help="Label windows: AI on text, AI on the replay, or people on a local page")
-    s.add_argument("labeller", choices=("text", "replay", "human"))
+    s = sub.add_parser("label", help="Label windows: AI on text, AI on the replay, people on a local page, or visitors' own answers")
+    s.add_argument("labeller", choices=("text", "replay", "human", "self_report"))
     s.add_argument("recipe")
     s.add_argument("--port", type=int, default=8795)
     s.add_argument("--limit", type=int, default=200, help="Human page: windows to offer")
@@ -147,11 +162,18 @@ def main(argv=None):
 
     s = sub.add_parser("deploy", help="Copy a model to your site's static files for live labelling")
     s.add_argument("name")
-    s.add_argument("--out", required=True, help="Folder your site serves, e.g. public/orion")
+    s.add_argument("--out", default="public/orion", help="Folder your site serves (default public/orion)")
     s.add_argument("--version", type=int)
     s.add_argument("--context", action="append", help="Agent that should receive these labels (repeatable)")
     s.add_argument("--url-prefix", default="/orion/", help="URL path where --out is served")
     s.set_defaults(fn=cmd_deploy)
+
+    s = sub.add_parser("survey", help="Rank the self-report answers for each page and mood (Jev, or the AI labeller's model)")
+    s.add_argument("recipe")
+    s.add_argument("--pages", type=int, default=20, help="Busiest pages to rank answers for (plus one site-wide entry)")
+    s.add_argument("--out", help="Also write the survey file here, e.g. public/orion")
+    s.add_argument("--url-prefix", default="/orion/", help="URL path where --out is served")
+    s.set_defaults(fn=cmd_survey)
 
     s = sub.add_parser("context", help="The live label for one session, with evidence and a replay link")
     s.add_argument("session")
@@ -162,6 +184,7 @@ def main(argv=None):
     s = sub.add_parser("search", help="Find sessions and pages by inferred label")
     s.add_argument("--label")
     s.add_argument("--page", help="Path prefix, e.g. /checkout")
+    s.add_argument("--cohort", help="Only people in this PostHog cohort (its id or exact name)")
     s.add_argument("--last", default="30d")
     s.add_argument("--model")
     s.add_argument("--limit", type=int, default=100)

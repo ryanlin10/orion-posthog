@@ -2,6 +2,11 @@ export const SCHEMA_VERSION: '1.3';
 export const EVENT_NAME: 'orion_input';
 export const SESSION_EVENT: 'orion_session_start';
 export const LABEL_EVENT: 'orion_label';
+export const SELF_REPORT_EVENT: 'orion_self_report';
+export const MOOD_MODEL: 'orion:mood';
+export const MOODS: ['angry', 'frustrated', 'calm', 'anxious', 'confused', 'pleased'];
+export const POSITIVE: string[];
+export const NEGATIVE: string[];
 export const VERSION: string;
 export type Mask = 'timing' | 'types' | 'off' | 'code';
 
@@ -50,6 +55,8 @@ export interface Recorder {
   stop(): void;
   getStats(): RecorderStats;
   permitted(): boolean;
+  /** This recorder's id, as in every orion_input event. */
+  recorderId: string;
 }
 export function createRecorder(posthog: PostHogClient, options?: RecorderOptions & { onRecord?: (row: Record<string, unknown>) => void; onReset?: () => void }): Recorder;
 
@@ -82,9 +89,40 @@ export interface OrionContext {
   updated_at: string;
 }
 
+export interface SelfReportOptions {
+  /** Default 'How is it going so far?' (or the survey file's). */
+  question?: string;
+  /** Answers to choose two of each from. Default: calm, pleased, engaged, confident / frustrated, confused, anxious, angry, bored. */
+  positive?: string[];
+  negative?: string[];
+  /** Survey file from `orion survey` (URL or object): answers ranked by Jev for each page and mood. */
+  survey?: string | Record<string, unknown>;
+  /** Your own ranking, e.g. a call to your backend. Return answers most relevant first; 1.5 s limit. */
+  rank?: (context: { page: string; mood: string | null; probabilities: Record<string, number> | null; positive: string[]; negative: string[] }) =>
+    Promise<string[] | { positive: string[]; negative: string[] } | null> | string[] | null;
+  /** 'time' (default): after afterMs of the page being open. 'mood': once the mood reading has been negative for 3 s. 'manual': only orion.ask(). */
+  trigger?: 'time' | 'mood' | 'manual';
+  afterMs?: number;
+  /** Share of page loads that may ask (default 1). */
+  sample?: number;
+  /** Days before the same browser is asked again after answering or closing (default 14). */
+  cooldownDays?: number;
+  /** Only ask on these path prefixes. */
+  pages?: string[];
+  position?: 'right' | 'left';
+  /** Display text per answer, e.g. { calm: 'All good' }. */
+  labels?: Record<string, string>;
+  /** CSS custom properties without the --orion- prefix: bg, fg, line, bg-dark, fg-dark, line-dark, accent, z. */
+  theme?: Record<string, string>;
+}
+
 export interface ConnectOptions extends RecorderOptions {
   /** Model URLs (from `orion deploy`) or model objects to label sessions with. */
   models?: Array<string | OrionModel>;
+  /** The built-in mood reading (the demo's heuristics). true, or { hold, agents, local }. */
+  mood?: boolean | { hold?: number; agents?: string[]; local?: boolean };
+  /** Ask people how it is going, for self-report labels. */
+  selfReport?: boolean | SelfReportOptions;
   live?: { every?: number; heartbeat?: number; confirm?: number; send?: boolean };
   /** onnxruntime-web, for sequence models (defaults to window.ort). */
   ort?: unknown;
@@ -99,6 +137,10 @@ export interface Orion {
   contextText(model?: string): string;
   labels(): OrionContext[];
   onLabel(fn: (context: OrionContext) => void): () => void;
+  /** The built-in mood reading now, if it runs. */
+  mood(): { mood: string; confidence: number; probabilities: Record<string, number>; since: string } | null;
+  /** Ask how it is going now. Resolves with the answer, or null when closed or not allowed. */
+  ask(): Promise<string | null>;
   flush(reason?: string): void;
   pause(): void;
   resume(): void;

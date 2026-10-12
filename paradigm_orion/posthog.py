@@ -38,7 +38,8 @@ class PostHog:
     def __init__(self, host=None, project_id=None, api_key=None, ui_host=None, sleep=time.sleep, poll_seconds=5):
         self.host = (host or os.environ.get("POSTHOG_HOST") or US_HOST).rstrip("/")
         self.project_id = str(project_id or os.environ.get("POSTHOG_PROJECT_ID") or "")
-        self.api_key = api_key or os.environ.get("POSTHOG_PERSONAL_API_KEY")
+        from .credentials import get as stored_key  # The environment first, then the keys file.
+        self.api_key = api_key or stored_key("POSTHOG_PERSONAL_API_KEY")
         self.ui_host = (ui_host or ui_host_for(self.host)).rstrip("/")
         self.sleep, self.poll_seconds = sleep, poll_seconds
         self._plain = urllib.request.build_opener()
@@ -46,9 +47,9 @@ class PostHog:
 
     def request(self, method, path, body=None, attempts=5):
         if not self.api_key:
-            raise PostHogError("Set POSTHOG_PERSONAL_API_KEY (a personal API key with query:read and batch_export:read/write scopes)")
-        if not self.project_id:
-            raise PostHogError("Set POSTHOG_PROJECT_ID or run `orion init --project <id>`")
+            raise PostHogError("No PostHog personal API key: run `orion init` (or set POSTHOG_PERSONAL_API_KEY)")
+        if not self.project_id and path.startswith("/api/projects/") and path != "/api/projects/":
+            raise PostHogError("No PostHog project: run `orion init` (or set POSTHOG_PROJECT_ID)")
         url = f"{self.host}{path}"
         data = json.dumps(body).encode() if body is not None else None
         for attempt in range(attempts):

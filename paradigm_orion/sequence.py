@@ -15,19 +15,34 @@ import numpy as np
 
 CHANNELS = ["moves", "path", "peak_speed", "turning", "pointer_downs", "pointer_ups", "click_hold", "key_downs", "key_ups",
             "key_hold", "wheel", "focus_changes", "gap", "active"]
+# The telemetry family behind each channel; capture gaps and activity belong to every recipe.
+CHANNEL_FAMILY = {"moves": "pointer", "path": "pointer", "peak_speed": "pointer", "turning": "pointer", "pointer_downs": "pointer",
+                  "pointer_ups": "pointer", "click_hold": "pointer", "key_downs": "keyboard", "key_ups": "keyboard", "key_hold": "keyboard",
+                  "wheel": "scroll", "focus_changes": "focus", "gap": None, "active": None}
+KIND_FAMILY = {"pointermove": "pointer", "pointerdown": "pointer", "pointerup": "pointer", "pointercancel": "pointer", "click": "pointer",
+               "dblclick": "pointer", "contextmenu": "pointer", "keydown": "keyboard", "keyup": "keyboard", "wheel": "scroll",
+               "scroll": "scroll", "focusin": "focus", "focusout": "focus"}
 
 
-def encode_steps(events, duration_ms, steps, step_ms):
-    """events: normalized rows sorted by t, t relative to the window start. Returns float32 [steps, 14]."""
+def channels_for(families):
+    """The channels a recipe's telemetry families keep."""
+    return [c for c in CHANNELS if CHANNEL_FAMILY[c] is None or CHANNEL_FAMILY[c] in families]
+
+
+def encode_steps(events, duration_ms, steps, step_ms, channels=CHANNELS):
+    """events: normalized rows sorted by t, t relative to the window start. Returns float32 [steps, len(channels)].
+    Input from families without a channel is skipped entirely, so it does not show up in `active` either."""
     C = len(CHANNELS)
     out = np.zeros((steps, C), dtype=np.float32)
     path, peak, turn = np.zeros(steps), np.zeros(steps), np.zeros(steps)
     click_hold, key_hold = np.zeros(steps), np.zeros(steps)
     offset = steps * step_ms - duration_ms
     pointers, keys, clicks = {}, {}, {}
+    kept = {CHANNEL_FAMILY[c] for c in channels}
     for row in events:
         i = math.floor((row["t"] + offset) / step_ms)
-        if i < 0 or i >= steps:
+        family = KIND_FAMILY.get(row["kind"])
+        if i < 0 or i >= steps or (family and family not in kept):
             continue
         out[i, 13] = 1
         kind = row["kind"]
@@ -74,7 +89,7 @@ def encode_steps(events, duration_ms, steps, step_ms):
             out[i, 11] += 1
     out[:, 1], out[:, 2], out[:, 3] = np.log1p(path), np.log1p(peak), np.log1p(turn)
     out[:, 6], out[:, 9] = np.log1p(click_hold), np.log1p(key_hold)
-    return out
+    return out if channels == CHANNELS else out[:, [CHANNELS.index(c) for c in channels]]
 
 
 def _torch():
@@ -172,7 +187,8 @@ class TorchClassifier:
         return self.classes_[self.predict_proba(x).argmax(axis=1)]
 
 
-def fit(architecture, x, y, x_val, y_val, target, params, seed, log=lambda *a: None):
+def fit(architecture, x, y, x_val, y_val, target, params, seed, log=lambda *a: None, curve=None):
+    """curve: optional (x, y) scored after every epoch for the report's loss curve; it never steers training."""
     torch, nn = _torch()
     torch.set_num_threads(os.cpu_count() or 1)
     torch.manual_seed(seed)
@@ -200,31 +216,37 @@ def fit(architecture, x, y, x_val, y_val, target, params, seed, log=lambda *a: N
     optimiser = torch.optim.AdamW(net.parameters(), lr=float(params.get("learning_rate", 1e-3)), weight_decay=1e-4)
     epochs, patience, batch = int(params.get("epochs", 40)), int(params.get("patience", 6)), int(params.get("batch", 64))
     best, best_state, waited = math.inf, None, 0
-    val_inputs = torch.tensor(x_val) if len(x_val) else None
-    val_targets = None
-    if val_inputs is not None:
+    def tensors(xs, ys):
+        """Inputs and targets for scoring, without examples whose class the model never saw."""
+        if not len(xs):
+            return None, None
         if continuous:
-            val_targets = torch.tensor(np.asarray(y_val, dtype=np.float32)).unsqueeze(1)
-        else:
-            known = [index.get(v, -1) for v in y_val]
-            keep = [i for i, k in enumerate(known) if k >= 0]
-            val_inputs = val_inputs[keep]
-            val_targets = torch.tensor([known[i] for i in keep])
-            if outputs == 1:
-                val_targets = val_targets.float().unsqueeze(1)
+            return torch.tensor(xs), torch.tensor(np.asarray(ys, dtype=np.float32)).unsqueeze(1)
+        keep = [i for i, v in enumerate(ys) if v in index]
+        codes = torch.tensor([index[ys[i]] for i in keep])
+        return torch.tensor(xs)[keep], codes.float().unsqueeze(1) if outputs == 1 else codes
+
+    val_inputs, val_targets = tensors(x_val, y_val)
+    curve_inputs, curve_targets = tensors(*curve) if curve is not None else (None, None)
+    history = []
     generator = torch.Generator().manual_seed(seed)
     for epoch in range(epochs):
         net.train()
         order = torch.randperm(len(inputs), generator=generator)
+        total = 0.0
         for start in range(0, len(order), batch):
             idx = order[start:start + batch]
             optimiser.zero_grad()
             loss = loss_fn(net(inputs[idx]), targets[idx])
             loss.backward()
             optimiser.step()
+            total += loss.item() * len(idx)
         net.eval()
         with torch.no_grad():
             monitored = float(loss_fn(net(val_inputs), val_targets)) if val_inputs is not None and len(val_inputs) else float(loss_fn(net(inputs), targets))
+            held_out = float(loss_fn(net(curve_inputs), curve_targets)) if curve_inputs is not None and len(curve_inputs) else None
+        history.append({"epoch": epoch + 1, "train": round(total / len(order), 5), "early_stopping": round(monitored, 5),
+                        "validation": None if held_out is None else round(held_out, 5)})
         if monitored < best - 1e-4:
             best, waited = monitored, 0
             best_state = {k: v.clone() for k, v in net.state_dict().items()}
@@ -235,7 +257,9 @@ def fit(architecture, x, y, x_val, y_val, target, params, seed, log=lambda *a: N
     if best_state:
         net.load_state_dict(best_state)
     log(f"  stopped after {epoch + 1} epochs (best monitored loss {best:.4f})")
-    return TorchClassifier(net, classes, continuous)
+    model = TorchClassifier(net, classes, continuous)
+    model.history = history
+    return model
 
 
 def export_onnx(model, path, steps, channels):
@@ -265,8 +289,9 @@ def train_sequence(workspace, recipe, dataset_dir, evaluate_test, log, shuffles=
     step_ms = int(params.get("step_ms", 100))
     seed = int(hashlib.sha256(recipe["name"].encode()).hexdigest()[:8], 16)
     steps = math.ceil(recipe["window"]["length_ms"] / step_ms)
-    x = {s: np.stack([encode_steps(r["sequence"], r["end_ms"] - r["start_ms"], steps, step_ms) for r in rows[s]]) if rows[s]
-         else np.zeros((0, steps, len(CHANNELS)), np.float32) for s in SPLITS}
+    channels = channels_for(recipe["telemetry"])
+    x = {s: np.stack([encode_steps(r["sequence"], r["end_ms"] - r["start_ms"], steps, step_ms, channels) for r in rows[s]]) if rows[s]
+         else np.zeros((0, steps, len(channels)), np.float32) for s in SPLITS}
     y = {s: [r["targets"][target["name"]] for r in rows[s]] for s in SPLITS}
     if not rows["train"]:
         raise ValueError("No training examples; label more windows first")
@@ -278,12 +303,15 @@ def train_sequence(workspace, recipe, dataset_dir, evaluate_test, log, shuffles=
     fit_x, stop_x = x["train"][~inner], x["train"][inner]
     fit_y = [v for v, m in zip(y["train"], inner) if not m]
     stop_y = [v for v, m in zip(y["train"], inner) if m]
-    log(f"Training a {architecture} on {len(fit_y)} windows of {steps} steps ({len(stop_y)} more decide when to stop)")
-    model = fit(architecture, fit_x, fit_y, stop_x, stop_y, target, params, seed, log)
+    log(f"Training a {architecture} on {len(fit_y)} windows of {steps} steps × {len(channels)} channels ({len(stop_y)} more decide when to stop)")
+    model = fit(architecture, fit_x, fit_y, stop_x, stop_y, target, params, seed, log, curve=(x["validation"], y["validation"]))
     names = manifest["features"]
     baseline = MostCommon(y["train"], target["type"] == "continuous")
+    loss = "mean squared error" if target["type"] == "continuous" else "cross-entropy, weighted by class"
     report = {"recipe": recipe["name"], "architecture": architecture, "dataset": str(dataset_dir), "steps": steps, "step_ms": step_ms,
-              "counts": {s: len(rows[s]) for s in SPLITS}, "metrics": {}, "warnings": list(manifest.get("warnings", []))}
+              "channels": channels, "counts": {s: len(rows[s]) for s in SPLITS}, "metrics": {}, "warnings": list(manifest.get("warnings", [])),
+              "curve": {"loss": loss, "epochs": model.history,
+                        "kept_epoch": min(model.history, key=lambda h: h["early_stopping"])["epoch"] if model.history else None}}
     for split in ("validation", "test") if evaluate_test else ("validation",):
         report["metrics"][split] = metrics(target, model, baseline, x[split], y[split])
     if rows["validation"] and shuffles:
@@ -308,7 +336,7 @@ def train_sequence(workspace, recipe, dataset_dir, evaluate_test, log, shuffles=
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
     onnx_name = f"{recipe['name']}-v{version}.onnx"
-    export_onnx(model, tmp / onnx_name, steps, len(CHANNELS))
+    export_onnx(model, tmp / onnx_name, steps, len(channels))
     check_onnx(model, tmp / onnx_name, x["train"][:8])
     evidence = {}
     if names:
@@ -329,7 +357,7 @@ def train_sequence(workspace, recipe, dataset_dir, evaluate_test, log, shuffles=
                        "max_events": 100000, "allow_gaps": not recipe["quality"]["drop_gaps"]},
             "features": {"families": recipe["telemetry"], "exclude": recipe["features"]["exclude"], "names": names},
             "estimator": {"kind": "onnx", "file": onnx_name, "input": "steps", "output": "out", "steps": steps, "step_ms": step_ms,
-                          "channels": CHANNELS, "link": link, "classes": [str(c) for c in model.classes_] if model.classes_ is not None else None},
+                          "channels": channels, "link": link, "classes": [str(c) for c in model.classes_] if model.classes_ is not None else None},
             "evidence": evidence, "agents": recipe["deploy"]["context"],
             "live": {"every_ms": recipe["deploy"]["every_ms"], "heartbeat_ms": recipe["deploy"]["heartbeat_ms"], "confirm": recipe["deploy"]["confirm"]},
             "report": {"summary": report["summary"], "validation": report["metrics"].get("validation")},

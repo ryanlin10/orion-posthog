@@ -1,9 +1,13 @@
-"""`orion deploy`: put a trained model where the site serves static files, for orion.js to label live sessions."""
+"""`orion deploy`: put a trained model (and its self-report survey, if built) where the site serves static files, for
+orion.js to label live sessions."""
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import __version__
+
 LIVE_KINDS = {"linear", "forest", "boosted", "onnx"}
+CDN = f"https://cdn.paradigmmachines.ai/orion@{__version__}/orion.js"
 
 
 def deploy(workspace, name, out_dir, version=None, context=None, url_prefix="/orion/"):
@@ -28,11 +32,18 @@ def deploy(workspace, name, out_dir, version=None, context=None, url_prefix="/or
         (out_dir / onnx.name).write_bytes(onnx.read_bytes())
         extra.append(out_dir / onnx.name)
     url = f"{url_prefix.rstrip('/')}/{target.name}"
+    options = f"mask: 'timing', models: ['{url}']"
+    survey = workspace.path("surveys", f"{name}.json")
+    if survey.exists():
+        copied = out_dir / f"{name}-survey.json"
+        copied.write_text(json.dumps(json.loads(survey.read_text()), separators=(",", ":")))
+        extra.append(copied)
+        options += f", selfReport: {{ survey: '{url_prefix.rstrip('/')}/{copied.name}' }}"
     record = {"version": spec["version"], "file": str(target.resolve()), "url": url, "agents": spec.get("agents", []),
               "deployed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     workspace.path("models", name, "deployed.json").write_text(json.dumps(record, indent=2) + "\n")
-    snippet = (f"<script>window.orionOptions = {{ mask: 'timing', models: ['{url}'] }};</script>\n"
-               f"<script src=\"/vendor/orion.js\" defer></script>  <!-- dist/orion.js from `npm run build` -->\n\n"
+    snippet = (f"<script>window.orionOptions = {{ {options} }};</script>\n"
+               f"<script src=\"{CDN}\" defer></script>\n\n"
                f"// or, with a bundler:\n"
-               f"orion.connect(posthog, {{ mask: 'timing', models: ['{url}'] }})")
+               f"orion.connect(posthog, {{ {options} }})")
     return target, extra, snippet, spec

@@ -18,7 +18,7 @@ from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor, RandomForestClassifier, RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression, Ridge
-from sklearn.metrics import balanced_accuracy_score, f1_score, mean_absolute_error, roc_auc_score
+from sklearn.metrics import balanced_accuracy_score, f1_score, log_loss, mean_absolute_error, roc_auc_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -62,6 +62,32 @@ def estimator_for(architecture, target_type, params, seed):
                                       class_weight="balanced", n_jobs=1, random_state=seed)
     return GradientBoostingClassifier(n_estimators=int(trees or 200), max_depth=int(depth or 3), learning_rate=float(params.get("learning_rate", 0.05)),
                                       subsample=0.8, random_state=seed)
+
+
+def boosting_curve(model, target, x_train, y_train, x_val, y_val, points=100):
+    """Train and validation loss after each round of trees, for boosted models (other estimators have no rounds)."""
+    estimator = model.steps[-1][1]
+    if not isinstance(estimator, (GradientBoostingClassifier, GradientBoostingRegressor)):
+        return None
+    prepare = model[:-1]
+    continuous = target["type"] == "continuous"
+
+    def losses(x, y):
+        if not len(y):
+            return None
+        xt = prepare.transform(x)
+        if continuous:
+            return [float(np.mean((np.asarray(y, dtype=float) - p) ** 2)) for p in estimator.staged_predict(xt)]
+        known = [i for i, v in enumerate(y) if v in set(estimator.classes_)]
+        if not known:
+            return None
+        return [float(log_loss([y[i] for i in known], p[known], labels=estimator.classes_)) for p in estimator.staged_predict_proba(xt)]
+
+    train, validation = losses(x_train, y_train), losses(x_val, y_val)
+    every = max(1, len(train) // points)
+    rounds = [i for i in range(len(train)) if i % every == every - 1 or i == len(train) - 1]
+    return {"loss": "mean squared error" if continuous else "log loss", "unit": "trees",
+            "epochs": [{"epoch": i + 1, "train": round(train[i], 5), "validation": None if validation is None else round(validation[i], 5)} for i in rounds]}
 
 
 def pipeline_for(architecture, target_type, params, seed):
@@ -167,7 +193,8 @@ def train(workspace, recipe, dataset_dir=None, architecture=None, evaluate_test=
               "dataset": str(dataset_dir), "dataset_manifest_sha256": hashlib.sha256((dataset_dir / "manifest.json").read_bytes()).hexdigest(),
               "features": names, "counts": {s: len(rows[s]) for s in SPLITS}, "label_sources": dict(sorted(
                   Counter(f"{r['label']['source']}:{r['label']['version']}" for s in SPLITS for r in rows[s]).items())),
-              "metrics": {}, "warnings": list(manifest.get("warnings", []))}
+              "metrics": {}, "warnings": list(manifest.get("warnings", [])),
+              "curve": boosting_curve(model, target, x["train"], y["train"], x["validation"], y["validation"])}
     for split in ("validation", "test") if evaluate_test else ("validation",):
         report["metrics"][split] = metrics(target, model, baseline, x[split], y[split])
     if rows["validation"]:

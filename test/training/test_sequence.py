@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from paradigm_orion.sequence import CHANNELS, encode_steps
+from paradigm_orion.sequence import CHANNELS, channels_for, encode_steps
 
 ROOT = Path(__file__).resolve().parents[2]
 HAS_TORCH = importlib.util.find_spec("torch") is not None
@@ -17,7 +17,7 @@ RUNNER = """
 import { readFileSync } from 'node:fs';
 import { encodeSteps } from '%s';
 const cases = JSON.parse(readFileSync(process.argv[2], 'utf8'));
-console.log(JSON.stringify(cases.map(c => Array.from(encodeSteps(c.events, c.duration, c.steps, c.step)))));
+console.log(JSON.stringify(cases.map(c => Array.from(encodeSteps(c.events, c.duration, c.steps, c.step, c.channels)))));
 """ % (ROOT / "src" / "sequence.js").as_uri()
 
 
@@ -50,18 +50,30 @@ def random_events(seed, duration):
 
 class EncodingParityTests(unittest.TestCase):
     def test_browser_and_python_steps_match(self):
-        cases = [{"events": random_events(seed, duration), "duration": duration, "steps": 200, "step": 50}
-                 for seed, duration in ((1, 10000), (2, 7300), (3, 10000), (4, 4100))]
+        families = (["pointer", "keyboard", "scroll", "focus"], ["pointer"], ["keyboard", "scroll"], ["keyboard", "focus"])
+        cases = [{"events": random_events(seed, duration), "duration": duration, "steps": 200, "step": 50, "channels": channels_for(f)}
+                 for (seed, duration), f in zip(((1, 10000), (2, 7300), (3, 10000), (4, 4100)), families)]
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             (tmp / "cases.json").write_text(json.dumps(cases))
             (tmp / "run.mjs").write_text(RUNNER)
             got = json.loads(subprocess.run(["node", tmp / "run.mjs", tmp / "cases.json"], check=True, capture_output=True, text=True).stdout)
         for case, js in zip(cases, got):
-            expected = encode_steps(case["events"], case["duration"], case["steps"], case["step"])
-            self.assertGreater(expected[:, 13].sum(), 10)
+            expected = encode_steps(case["events"], case["duration"], case["steps"], case["step"], case["channels"])
+            self.assertEqual(expected.shape, (case["steps"], len(case["channels"])))
+            self.assertGreater(expected[:, case["channels"].index("active")].sum(), 0)
             np.testing.assert_array_equal(np.array(js, dtype=np.float32).reshape(expected.shape), expected)
         self.assertEqual(len(CHANNELS), 14)
+
+    def test_unchosen_families_leave_no_trace(self):
+        events = random_events(5, 10000)
+        pointer_only = [e for e in events if e["kind"] not in ("keydown", "keyup", "wheel", "focusin", "focusout")]
+        channels = channels_for(["pointer"])
+        self.assertEqual(channels, ["moves", "path", "peak_speed", "turning", "pointer_downs", "pointer_ups", "click_hold", "gap", "active"])
+        np.testing.assert_array_equal(encode_steps(events, 10000, 100, 100, channels), encode_steps(pointer_only, 10000, 100, 100, channels))
+        full = encode_steps(events, 10000, 100, 100)
+        np.testing.assert_array_equal(full, encode_steps(events, 10000, 100, 100, CHANNELS))
+        self.assertEqual(full.shape, (100, 14))
 
 
 @unittest.skipUnless(HAS_TORCH, "Install paradigm-orion[sequence] for sequence model tests")
@@ -78,12 +90,16 @@ class SequenceModelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             recipe = tmp / "r.yaml"
-            recipe.write_text(e2e.RECIPE.replace("architecture: boosted_trees\n  trees: 150", "architecture: tcn\n  epochs: 12\n  hidden: 32"))
+            recipe.write_text(e2e.RECIPE.replace("architecture: boosted_trees\n  trees: 150", "architecture: tcn\n  epochs: 12\n  hidden: 32")
+                              .replace("telemetry: [pointer, keyboard, scroll, focus]", "telemetry: [pointer, keyboard]"))
             o = Orion(posthog_project="1", host=fake.url, api_key="phx_test", home=tmp / ".orion", llm=ScriptedModel(), log=lambda *a: None)
             o.posthog.sleep, o.posthog.poll_seconds = (lambda s: None), 0
             o.pull("30d", recipe=recipe)
             clf = o.train(recipe, shuffles=1)
             self.assertEqual(clf.spec["estimator"]["kind"], "onnx")
+            self.assertEqual(clf.spec["estimator"]["channels"], channels_for(["pointer", "keyboard"]))
+            curve = clf.report["curve"]["epochs"]
+            self.assertTrue(curve and all(e["train"] > 0 and e["validation"] > 0 for e in curve))
             self.assertGreater(clf.report["metrics"]["validation"]["balanced_accuracy"], 0.7)
             deployed = Path(clf.deploy(out=tmp / "public")["file"])
             onnx = deployed.parent / clf.spec["estimator"]["file"]
@@ -93,7 +109,7 @@ class SequenceModelTests(unittest.TestCase):
             _, data = load_dataset(tmp / ".orion" / "datasets" / "checkout-sentiment" / "v1")
             spec = clf.spec
             windows = data["validation"][:12]
-            steps = [encode_steps(r["sequence"], r["end_ms"] - r["start_ms"], spec["estimator"]["steps"], spec["estimator"]["step_ms"]) for r in windows]
+            steps = [encode_steps(r["sequence"], r["end_ms"] - r["start_ms"], spec["estimator"]["steps"], spec["estimator"]["step_ms"], spec["estimator"]["channels"]) for r in windows]
             (tmp / "cases.json").write_text(json.dumps([s.ravel().tolist() for s in steps]))
             got = json.loads(subprocess.run(["node", ROOT / "test" / "training" / "onnx_predict.mjs", deployed, onnx, tmp / "cases.json"],
                                             check=True, capture_output=True, text=True).stdout)

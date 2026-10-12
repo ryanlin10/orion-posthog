@@ -10,6 +10,7 @@ from pathlib import Path
 
 ARCHITECTURES = ("logistic", "random_forest", "boosted_trees", "gru", "tcn", "transformer")
 SEQUENCE_ARCHITECTURES = ("gru", "tcn", "transformer")
+ALIASES = {"temporal_cnn": "tcn", "trees": "boosted_trees", "forest": "random_forest"}
 FAMILIES = ("pointer", "keyboard", "scroll", "focus", "volume")
 LABELLERS = ("human", "self_report", "model")
 READERS = ("text", "replay")
@@ -17,7 +18,10 @@ ALIGNS = ("past", "symmetric", "future")
 SPLITS = ("user", "day", "session")
 TOP_LEVEL = {"name", "source", "target", "window", "telemetry", "labels", "split", "model", "deploy", "quality", "features"}
 
-DEFAULT_LLM = "claude-sonnet-5-5"
+# Self-report answers people can choose, by polarity. A recipe may name its own.
+POSITIVE = ("calm", "pleased", "engaged", "confident")
+NEGATIVE = ("frustrated", "confused", "anxious", "angry", "bored")
+DEFAULT_QUESTION = "How is it going so far?"
 
 
 class RecipeError(ValueError):
@@ -60,6 +64,28 @@ def parse_target(name, spec):
     if isinstance(spec, dict):
         return copy.deepcopy(spec)
     raise RecipeError(f"Target {name} must be binary, a list of classes, or score(min, max)")
+
+
+def parse_self_report(raw, target_name, target):
+    """The question people answer and the answers on offer. By default the answers are the target's classes when
+    they include at least two known positive and two known negative feelings, and Orion's standard lists otherwise."""
+    if set(raw) - {"question", "positive", "negative"}:
+        raise RecipeError("labels.self_report accepts question, positive and negative")
+    classes = target.get("classes") if target["type"] == "categorical" and not target.get("binary") else None
+    known_pos = [c for c in classes or () if c in POSITIVE]
+    known_neg = [c for c in classes or () if c in NEGATIVE]
+    use_classes = len(known_pos) >= 2 and len(known_neg) >= 2
+    positive = raw.get("positive", known_pos if use_classes else list(POSITIVE))
+    negative = raw.get("negative", known_neg if use_classes else list(NEGATIVE))
+    for name, values in (("positive", positive), ("negative", negative)):
+        if not isinstance(values, list) or len(values) < 2 or any(not isinstance(v, str) or not re.fullmatch(r"[a-z][a-z_-]{0,30}", v) for v in values):
+            raise RecipeError(f"labels.self_report.{name} must list at least two lowercase answers")
+    if set(positive) & set(negative):
+        raise RecipeError("An answer cannot be both positive and negative")
+    question = raw.get("question", DEFAULT_QUESTION)
+    if not isinstance(question, str) or not 0 < len(question) <= 120:
+        raise RecipeError("labels.self_report.question must be a short sentence")
+    return {"question": question, "positive": positive, "negative": negative}
 
 
 def load_recipe(path):
@@ -122,8 +148,8 @@ def compile_recipe(raw):
         raise RecipeError("features accepts exclude and hook")
 
     labels = raw.get("labels", {}) or {}
-    if set(labels) - {"by", "min_confidence", "model"}:
-        raise RecipeError("labels accepts by, min_confidence and model")
+    if set(labels) - {"by", "min_confidence", "model", "self_report"}:
+        raise RecipeError("labels accepts by, min_confidence, model and self_report")
     by = labels.get("by", ["human"])
     if not isinstance(by, list) or not by or set(by) - set(LABELLERS):
         raise RecipeError(f"labels.by must list some of {', '.join(LABELLERS)}")
@@ -141,8 +167,10 @@ def compile_recipe(raw):
     min_confidence = labels.get("min_confidence", 0.0)
     if not isinstance(min_confidence, (int, float)) or not 0 <= min_confidence <= 1:
         raise RecipeError("labels.min_confidence must be between 0 and 1")
-    labels = {"by": by, "min_confidence": float(min_confidence),
-              "model": {"reads": reads, "llm": model_labels.get("llm", DEFAULT_LLM), "guide": model_labels.get("guide", ""),
+    self_report = parse_self_report(labels.get("self_report", {}) or {}, target_name, target_def)
+    labels = {"by": by, "min_confidence": float(min_confidence), "self_report": self_report,
+              # No llm: the model chosen at `orion init` (or the first provider with a saved key).
+              "model": {"reads": reads, "llm": model_labels.get("llm"), "guide": model_labels.get("guide", ""),
                         "max_sessions": int(model_labels.get("max_sessions", 500)),
                         "text": {"event": text.get("event", "$ai_generation"), "property": text.get("property", "$ai_input"), "file": text.get("file")}}}
 
@@ -155,14 +183,15 @@ def compile_recipe(raw):
     if not split_by or set(split_by) - set(SPLITS) or len(set(split_by)) != len(split_by):
         raise RecipeError("split.by must list user, day and/or session")
     if "session" in split_by and len(split_by) > 1:
-        raise RecipeError("split.by session cannot be combined with user or day")
+        # Sessions sit inside users and days, so alongside either they add nothing: keeping users apart keeps their sessions apart.
+        split_by = [s for s in split_by if s != "session"]
     fractions = {"train": split.get("train", 0.7), "validation": split.get("validation", split.get("val", 0.15)), "test": split.get("test", 0.15)}
     if any(not isinstance(v, (int, float)) or v < 0 for v in fractions.values()) or abs(sum(fractions.values()) - 1) > 1e-6:
         raise RecipeError("split fractions must be non-negative and add up to 1")
     split = {"by": split_by, "fractions": {k: float(v) for k, v in fractions.items()}, "seed": str(split.get("seed", name))}
 
     model = raw.get("model", {}) or {}
-    architecture = model.get("architecture", "boosted_trees")
+    architecture = ALIASES.get(model.get("architecture", "boosted_trees"), model.get("architecture", "boosted_trees"))
     if architecture not in ARCHITECTURES:
         raise RecipeError(f"model.architecture must be one of {', '.join(ARCHITECTURES)}")
     params = {k: v for k, v in model.items() if k not in ("architecture", "input")}

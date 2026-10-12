@@ -316,6 +316,7 @@ export function createRecorder(posthog, options = {}) {
     stop() { if (stopped) return; stopped = true; generation++; flush('stop'); pressed.clear(); clearTimers(); listeners.forEach(fn => fn()); instances.delete(win); },
     getStats() { return { ...stats, buffered: records.length, paused, stopped, movementSource: source, mask: config.keyboard }; },
     permitted: () => !stopped && permitted(),
+    recorderId: id,
   };
   instances.set(win, api);
   return api;

@@ -1,18 +1,37 @@
-"""The language model behind Orion's AI labellers. Calls run with the customer's own key, and every answer is
-cached in .orion/cache/llm.jsonl so rebuilding a dataset does not pay for the same labels twice."""
+"""The language model behind Orion's AI labellers: Anthropic, OpenAI or Gemini, called with the customer's own key.
+Every answer is cached in .orion/cache/llm.jsonl so rebuilding a dataset does not pay for the same labels twice.
+
+A model name picks its provider (claude-* is Anthropic, gpt-* and o3-style names are OpenAI, gemini-* is Gemini),
+or a prefix says it outright, e.g. openai:my-model. Keys come from credentials.get. ORION_ANTHROPIC_URL,
+ORION_OPENAI_URL and ORION_GEMINI_URL point the clients elsewhere (scheme and host, no /v1).
+"""
 import hashlib
 import json
 import os
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+from . import credentials
+from .jev import MODEL as JEV_MODEL, URL as JEV_URL
+
+PROVIDERS = ("anthropic", "openai", "gemini")  # Also the order make_client looks for a saved key in.
+NAMES = {"anthropic": "Anthropic", "openai": "OpenAI", "gemini": "Gemini"}
+KEY_NAMES = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "gemini": "GEMINI_API_KEY"}
+DEFAULT_MODELS = {"anthropic": "claude-sonnet-5-5", "openai": "gpt-5.6-sol", "gemini": "gemini-3.8-flash"}
+BASE_URLS = {"anthropic": "https://api.anthropic.com", "openai": "https://api.openai.com", "gemini": "https://generativelanguage.googleapis.com"}
+RETRY = (429, 500, 502, 503, 529)  # Busy or briefly down: wait and ask again.
+SETUP = (401, 402, 403, 404)  # Key, billing or model name: asking again cannot help. A 400 fails only that request.
+TYPESAFE_CHECK = {"model": JEV_MODEL, "state": "Orion key check", "questions": {"ok": {
+    "type": "noul", "instructions": "Is this a key check?", "criteria": {"true": "yes", "false": "no"}}}}
 
 
 class LLMError(RuntimeError):
-    pass
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status  # The HTTP status, when the API answered with one.
 
 
 class LLMSetupError(LLMError):
@@ -30,32 +49,207 @@ def parse_json(text):
     return json.JSONDecoder().raw_decode(text[min(starts):])[0]
 
 
-class Anthropic:
-    def __init__(self, model, api_key=None, max_tokens=4096, sleep=time.sleep):
+def base_url(service, base=None):
+    return (base or os.environ.get(f"ORION_{service.upper()}_URL") or BASE_URLS[service]).rstrip("/")
+
+
+def wait_seconds(retry_after, attempt):
+    """Retry-After when the server gives seconds, else 2, 4, 8... seconds, at most a minute."""
+    try:
+        return min(600.0, max(0.0, float(retry_after)))
+    except (TypeError, ValueError):
+        return min(60, 2 ** attempt * 2)
+
+
+def excerpt(raw, key=None):
+    """A short one-line piece of an error reply, with the key blanked out should the server echo it."""
+    text = " ".join(raw.decode(errors="replace").split())
+    return (text.replace(key, "[key]") if key else text)[:300]
+
+
+def send(name, method, url, headers, body=None, key=None, sleep=time.sleep, attempts=6):
+    """One request under the shared retry policy; returns the reply body. Error messages never hold the key."""
+    data = None if body is None else json.dumps(body).encode()
+    for attempt in range(attempts):
+        req = urllib.request.Request(url, data=data, method=method, headers={**headers, "content-type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=300) as response:
+                return response.read()
+        except urllib.error.HTTPError as error:
+            if error.code in RETRY and attempt < attempts - 1:
+                sleep(wait_seconds(error.headers.get("retry-after"), attempt))
+                continue
+            kind = LLMSetupError if error.code in SETUP else LLMError
+            raise kind(f"{name} API returned HTTP {error.code}: {excerpt(error.read(), key)}", error.code) from None
+        except OSError as error:  # No connection, DNS, timeouts.
+            host = urllib.parse.urlsplit(url).netloc
+            raise LLMError(f"Could not reach the {name} API at {host}: {getattr(error, 'reason', error)}") from None
+    raise LLMError(f"{name} API kept failing")
+
+
+class Provider:
+    """What the providers share: the key, the base URL and the retry policy. Each subclass says how to ask."""
+    provider = models_path = ""
+    max_tokens = 4096
+
+    def __init__(self, model, api_key=None, max_tokens=None, sleep=time.sleep, base=None):
         self.model = model
-        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        self.max_tokens, self.sleep = max_tokens, sleep
+        self.api_key = api_key or credentials.get(KEY_NAMES[self.provider])
+        self.max_tokens = max_tokens or self.max_tokens
+        self.sleep, self.base = sleep, base_url(self.provider, base)
+
+    @property
+    def name(self):
+        return NAMES[self.provider]
 
     def complete(self, system, prompt):
         if not self.api_key:
-            raise LLMSetupError("Set ANTHROPIC_API_KEY to use the AI labellers")
-        body = json.dumps({"model": self.model, "max_tokens": self.max_tokens, "temperature": 0, "system": system,
-                           "messages": [{"role": "user", "content": prompt}]}).encode()
-        for attempt in range(6):
-            req = urllib.request.Request(ANTHROPIC_URL, data=body, method="POST", headers={
-                "x-api-key": self.api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
-            try:
-                with urllib.request.urlopen(req, timeout=300) as response:
-                    reply = json.loads(response.read())
-                return "".join(part.get("text", "") for part in reply.get("content", []) if part.get("type") == "text")
-            except urllib.error.HTTPError as error:
-                if error.code in (429, 500, 502, 503, 529) and attempt < 5:
-                    retry = error.headers.get("retry-after")
-                    self.sleep(float(retry) if retry and retry.isdigit() else min(60, 2 ** attempt * 2))
-                    continue
-                detail = f"Anthropic API returned HTTP {error.code}: {error.read().decode(errors='replace')[:300]}"
-                raise (LLMSetupError if error.code in (401, 402, 403, 404) else LLMError)(detail) from None
-        raise LLMError("Anthropic API kept failing")
+            raise LLMSetupError(f"No {self.name} key: run `orion init` or set {KEY_NAMES[self.provider]}")
+        path, body = self.request(system, prompt)
+        return self.text(self.call("POST", path, body))
+
+    def call(self, method, path, body=None, attempts=6):
+        reply = send(self.name, method, self.base + path, self.headers(), body, self.api_key, self.sleep, attempts)
+        try:
+            return json.loads(reply) if reply else {}
+        except ValueError:
+            raise LLMError(f"{self.name} API replied with something other than JSON") from None
+
+    def check(self):
+        """Lists the provider's models, which only works with a valid key."""
+        return self.call("GET", self.models_path, attempts=2)
+
+
+class Anthropic(Provider):
+    provider, models_path = "anthropic", "/v1/models"
+
+    def headers(self):
+        return {"x-api-key": self.api_key, "anthropic-version": "2023-06-01"}
+
+    def request(self, system, prompt):
+        return "/v1/messages", {"model": self.model, "max_tokens": self.max_tokens, "temperature": 0, "system": system,
+                                "messages": [{"role": "user", "content": prompt}]}
+
+    @staticmethod
+    def text(reply):
+        return "".join(part.get("text", "") for part in reply.get("content") or [] if part.get("type") == "text")
+
+
+class OpenAI(Provider):
+    """The Responses API. No temperature: reasoning models reject it. store=false keeps prompts off OpenAI's servers."""
+    provider, models_path = "openai", "/v1/models"
+
+    def headers(self):
+        return {"Authorization": f"Bearer {self.api_key}"}
+
+    def request(self, system, prompt):
+        return "/v1/responses", {"model": self.model, "instructions": system, "input": prompt,
+                                 "max_output_tokens": self.max_tokens, "store": False}
+
+    @staticmethod
+    def text(reply):
+        text = "".join(part.get("text", "") for item in reply.get("output") or [] for part in item.get("content") or []
+                       if part.get("type") == "output_text")
+        if not text and reply.get("status") == "incomplete":
+            reason = (reply.get("incomplete_details") or {}).get("reason", "unknown")
+            raise LLMError(f"OpenAI stopped before answering ({reason})")
+        return text
+
+
+class Gemini(Provider):
+    provider, models_path, max_tokens = "gemini", "/v1beta/models", 8192
+
+    def headers(self):
+        return {"x-goog-api-key": self.api_key}
+
+    def request(self, system, prompt):
+        return f"/v1beta/models/{urllib.parse.quote(self.model, safe='')}:generateContent", {
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0, "maxOutputTokens": self.max_tokens}}
+
+    @staticmethod
+    def text(reply):
+        candidates = reply.get("candidates") or []
+        if not candidates:
+            raise LLMError(f"Gemini gave no answer ({(reply.get('promptFeedback') or {}).get('blockReason', 'no candidates')})")
+        parts = (candidates[0].get("content") or {}).get("parts") or []
+        return "".join(part.get("text", "") for part in parts if not part.get("thought"))
+
+
+CLIENTS = {"anthropic": Anthropic, "openai": OpenAI, "gemini": Gemini}
+
+
+def provider_for(model):
+    """The provider for a model name: an 'anthropic:', 'openai:' or 'gemini:' prefix wins, then the name's family."""
+    name = str(model or "").strip()
+    prefix, sep, _ = name.partition(":")
+    if sep and prefix.lower() in PROVIDERS:
+        return prefix.lower()
+    lower = name.lower()
+    if lower.startswith("claude-"):
+        return "anthropic"
+    if lower.startswith(("gpt-", "chatgpt-")) or re.match(r"o\d", lower):
+        return "openai"
+    if lower.startswith("gemini-"):
+        return "gemini"
+    raise LLMSetupError(f"Cannot tell which provider serves the model {name!r}: use a claude-*, gpt-*, o3-style or "
+                        "gemini-* name, or put anthropic:, openai: or gemini: in front of it")
+
+
+def split_model(model):
+    """(provider, the name its API expects): 'openai:gpt-5.6-sol' and 'gpt-5.6-sol' both give ('openai', 'gpt-5.6-sol')."""
+    provider = provider_for(model)
+    prefix, sep, rest = str(model).strip().partition(":")
+    name = rest.strip() if sep and prefix.lower() == provider else str(model).strip()
+    if not name:
+        raise LLMSetupError(f"No model name after {prefix}:")
+    return provider, name
+
+
+def client_for(model, api_key=None, sleep=time.sleep, base=None):
+    provider, name = split_model(model)
+    return CLIENTS[provider](name, api_key, sleep=sleep, base=base)
+
+
+def default_model():
+    """The default model of the first provider with a key available: Anthropic, then OpenAI, then Gemini."""
+    for provider in PROVIDERS:
+        if credentials.get(KEY_NAMES[provider]):
+            return DEFAULT_MODELS[provider]
+    raise LLMSetupError("Run `orion init` to choose an AI labeller and save its key")
+
+
+def failed(name, error):
+    if error.status in SETUP:
+        return f"{name} did not accept the key ({error})"
+    return f"Could not check the {name} key ({error})"
+
+
+def verify(provider, key, base=None, sleep=time.sleep):
+    """Checks a key by listing the provider's models. Returns (ok, message); the message never holds the key."""
+    if provider not in CLIENTS:
+        raise ValueError(f"Unknown provider {provider!r}; use {', '.join(PROVIDERS)}")
+    if not key:
+        return False, f"No {NAMES[provider]} key given"
+    try:
+        CLIENTS[provider](None, key, sleep=sleep, base=base).check()
+    except LLMError as error:
+        return False, failed(NAMES[provider], error)
+    return True, f"{NAMES[provider]} accepted the key"
+
+
+def verify_typesafe(key, base=None, sleep=time.sleep):
+    """Checks a TypeSafe key with a one-question call to Jev. Returns (ok, message) like verify."""
+    if not key:
+        return False, "No TypeSafe key given"
+    # ORION_TYPESAFE_URL is the whole endpoint, as in jev.py; base is scheme and host only.
+    url = f"{base.rstrip('/')}/v1/systemone" if base else os.environ.get("ORION_TYPESAFE_URL") or JEV_URL
+    try:
+        send("TypeSafe", "POST", url, {"Authorization": f"Bearer {key}"}, TYPESAFE_CHECK, key, sleep, attempts=2)
+    except LLMError as error:
+        return False, failed("TypeSafe", error)
+    return True, "TypeSafe accepted the key"
 
 
 class Cached:
@@ -86,4 +280,8 @@ class Cached:
 
 
 def make_client(model, workspace, client=None):
-    return Cached(client or Anthropic(model), workspace.path("cache", "llm.jsonl"))
+    """A cached client. The model is the recipe's, else the workspace's llm_model, else the default model of the
+    first provider with a key. A given client (tests, custom models) is wrapped as it is."""
+    if client is None:
+        client = client_for(model or workspace.config().get("llm_model") or default_model())
+    return Cached(client, workspace.path("cache", "llm.jsonl"))

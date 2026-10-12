@@ -6,7 +6,9 @@ description: Read Orion's live label for a user session (for example "frustrated
 # Orion context
 
 Orion labels each live session in the visitor's browser with a classifier trained from their input timing
-(pointer, keys, scroll, focus). Labels are inferences with a confidence, not facts about a person.
+(pointer, keys, scroll, focus), or with its built-in mood reading (model `orion-mood`: simple heuristics on pointer
+speed, turns and clicks). Labels are inferences with a confidence, not facts about a person; prefer a trained model's
+label over `orion-mood` when both exist.
 
 ## Get the label
 

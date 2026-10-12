@@ -38,6 +38,12 @@ def day_assignments(days, fractions):
 def run_labellers(store, recipe, llm=None, relabel=False, log=print):
     existing = load_all(store.ws, recipe)
     stats = {}
+    if "self_report" in recipe["labels"]["by"]:
+        # Cheap and exact, so always rebuilt from the pulled answers.
+        from .labellers.self_report import label_self_report
+        labels, stats["self_report"] = label_self_report(store, recipe)
+        save_labels(store.ws, recipe, "self_report", labels)
+        log(f"  self-report labels: {stats['self_report']}")
     if "model" not in recipe["labels"]["by"]:
         return stats
     for reader in recipe["labels"]["model"]["reads"]:
@@ -45,7 +51,7 @@ def run_labellers(store, recipe, llm=None, relabel=False, log=print):
             log(f"  {reader} labels: using {len(existing[reader])} saved labels (pass --relabel to redo)")
             continue
         if llm is None:
-            raise ValueError(f"The recipe asks for AI {reader} labels; set ANTHROPIC_API_KEY or pass a model client")
+            raise ValueError(f"The recipe asks for AI {reader} labels and none are saved; run `orion init` to choose an AI labeller")
         if reader == "text":
             from .labellers.text import label_text as run
         else:
@@ -64,7 +70,8 @@ def build(store, recipe, llm=None, relabel=False, log=print):
         raise ValueError("No Orion telemetry pulled yet; run `orion pull` first")
     label_stats = run_labellers(store, recipe, llm, relabel, log)
     all_labels = load_all(ws, recipe)
-    wanted = {"human": "human" in recipe["labels"]["by"], "text": "model" in recipe["labels"]["by"], "replay": "model" in recipe["labels"]["by"]}
+    by = recipe["labels"]["by"]
+    wanted = {"self_report": "self_report" in by, "human": "human" in by, "text": "model" in by, "replay": "model" in by}
     merged, overlaps = merge([labels for name, labels in all_labels.items() if wanted[name]])
     pages = tuple(recipe["source"]["pages"])
     cutoff = time.time() * 1000 - recipe["source"]["since_days"] * 86400000

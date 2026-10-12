@@ -13,8 +13,9 @@ orion train checkout-sentiment --evaluate-test                   # score the tes
 ```
 
 Each run writes `.orion/models/<name>/v<N>/`: `model.json` (what the browser runs), `report.json`, `recipe.json`,
-and for sequence models an `.onnx` file. Sequence architectures need `pip install 'paradigm-orion[sequence]'`.
-They train on CPU and are much slower than trees.
+and for sequence models an `.onnx` file. Sequence architectures need the `[sequence]` extra (see orion-datasets).
+They train on CPU and are much slower than trees. They read 100 ms time steps with only the channels of the recipe's
+telemetry families, so dropping a family really removes it (`report.json` lists the `channels`).
 
 ## Read the report
 
@@ -25,7 +26,9 @@ The summary line is the place to start, e.g.
 - **Shuffled-label check.** The same model is retrained with the labels shuffled. If shuffled models often match
   the real one (p above 0.05), the model has learnt nothing usable. Say so plainly and do not deploy it.
 - **Per-class recall** in `metrics.validation.recall`: a model that never predicts the rare class can still look fine on accuracy.
-- **Label sources** in `label_sources`: proxy labels (model) are not the person's own report.
+- **Label sources** in `label_sources`: proxy labels (model) are not the person's own report; `self_report` labels are.
+- **Loss curve** in `curve`: training and validation loss per epoch (sequence models) or per round of trees
+  (boosted trees). Validation loss rising while training loss falls means the model is memorising.
 
 ## Iterate
 

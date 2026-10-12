@@ -133,7 +133,7 @@ class EndToEndTests(unittest.TestCase):
         if not events:
             self.skipTest("live test did not run")
         for i, e in enumerate(events):
-            self.fake.labels.append({"timestamp": f"2026-10-11T12:{i // 60 % 60:02d}:{i % 60:02d}Z",
+            self.fake.labels.append({"timestamp": f"2026-10-11T12:{i // 60 % 60:02d}:{i % 60:02d}Z", "person_id": "person-" + e["session_id"].split("-")[1],
                                      "properties": {**e["props"], "$session_id": e["session_id"], "$pathname": "/checkout"}})
         session = events[-1]["session_id"]
         ctx = self.orion.context(session)
@@ -144,7 +144,19 @@ class EndToEndTests(unittest.TestCase):
         found = self.orion.search(label="frustrated", page="/checkout")
         self.assertTrue(found["sessions"])
         self.assertEqual(found["pages"][0]["page"], "/checkout")
+        # A cohort narrows the search to its people, found by name or by id.
+        person = self.fake.labels[0]["person_id"]
+        self.fake.cohorts = {7: {"name": "Paying customers", "people": {person}}, 8: {"name": "Trial", "people": set()}}
+        for cohort in ("Paying customers", "7", 7):
+            narrowed = self.orion.search(page="/checkout", cohort=cohort)
+            self.assertEqual(narrowed["cohort"], {"id": 7, "name": "Paying customers"})
+            self.assertTrue(narrowed["sessions"])
+            self.assertTrue(all(s["session_id"].split("-")[1] == person.split("-")[1] for s in narrowed["sessions"]))
+        self.assertLess(len(narrowed["sessions"]), len(self.orion.search(page="/checkout")["sessions"]))
+        with self.assertRaisesRegex(ValueError, "Found 0 cohorts"):
+            self.orion.search(cohort="Nobody")
         query = [r for r in self.fake.requests if r[0] == "POST" and r[1].endswith("/query/")]
+        self.assertTrue(any("person_id IN COHORT 7" in r[2]["query"]["query"] for r in query))
         self.assertTrue(all(r[2]["query"]["kind"] == "HogQLQuery" and "values" in r[2]["query"] for r in query))
 
 

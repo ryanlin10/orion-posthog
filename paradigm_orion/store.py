@@ -1,7 +1,7 @@
 """Local copy of a project's Orion telemetry and the surrounding events the labellers read.
 
 .orion/data/telemetry/*.jsonl  orion_input events (the dataset builder's input)
-.orion/data/context/*.jsonl    page views, clicks, rage/dead clicks, errors, survey answers, labels, text events
+.orion/data/context/*.jsonl    page views, clicks, rage/dead clicks, errors, survey answers, self-reports, labels, text events
 .orion/data/recordings.jsonl   one row per recorder: session, person, day, pages, spans and clock anchors
 """
 import bisect
@@ -14,7 +14,10 @@ from .posthog import read_export, week_chunks
 from .workspace import read_jsonl, write_jsonl
 
 TELEMETRY = ("orion_input", "behavioral_burst")
-CONTEXT_EVENTS = ("$pageview", "$pageleave", "$autocapture", "$rageclick", "$dead_click", "$exception", "survey sent", "orion_label", "orion_session_start")
+CONTEXT_EVENTS = ("$pageview", "$pageleave", "$autocapture", "$rageclick", "$dead_click", "$exception", "survey sent", "orion_label", "orion_session_start",
+                  "orion_self_report")
+SELF_REPORT_FIELDS = ("answer", "dismissed", "question", "options", "positive", "negative", "recorder_id", "shown_t", "answered_t",
+                      "mood", "ranked_by", "trigger")
 
 
 def element_text(chain):
@@ -43,6 +46,8 @@ def slim_context(row, text_events):
         out["detail"] = {"message": str(props.get("$exception_message") or first.get("value") or first.get("type") or "")[:200]}
     elif event == "survey sent":
         out["detail"] = {k: v for k, v in props.items() if k.startswith("$survey_response") or k == "$survey_name"}
+    elif event == "orion_self_report":
+        out["detail"] = {k: props.get(k) for k in SELF_REPORT_FIELDS}
     elif event == "orion_label":
         out["detail"] = {k: props.get(k) for k in ("model", "model_version", "target", "label", "confidence", "evidence")}
     elif not event.startswith("$"):
