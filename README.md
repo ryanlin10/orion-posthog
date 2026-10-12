@@ -45,7 +45,7 @@ snippet first installs a placeholder) and keeps waiting if your `init()` waits f
 </script>
 ```
 
-With a bundler (`npm i github:ryanlin10/posthog-behavioral-recorder`, which installs as `@paradigmmachines/orion`):
+With a bundler (`npm i github:ryanlin10/orion-posthog`, which installs as `@paradigmmachines/orion`):
 
 ```js
 import posthog from 'posthog-js';
@@ -98,7 +98,7 @@ are computed in the page, so they do not wait for uploads.
 ## Train a classifier
 
 ```sh
-pip install "paradigm-orion[sequence] @ git+https://github.com/ryanlin10/posthog-behavioral-recorder"   # Python 3.11+
+pip install "paradigm-orion[sequence] @ git+https://github.com/ryanlin10/orion-posthog"   # Python 3.11+
 orion init          # asks for the PostHog key and project, the AI labeller (Anthropic, OpenAI or Gemini) and its key,
                     # and a TypeSafe key for Jev; checks each one
 orion pull --since 30d --recipe recipes/checkout-sentiment.yaml
@@ -159,7 +159,7 @@ fetch('/api/assistant', { method: 'POST', body: JSON.stringify({ message, orion:
 ```
 
 Skill files in [skills/](skills/) teach coding and research agents the CLI: `orion-context`, `orion-research`,
-`orion-datasets`, `orion-train` and `orion-deploy` (`npx skills add ryanlin10/posthog-behavioral-recorder`).
+`orion-datasets`, `orion-train` and `orion-deploy` (`npx skills add ryanlin10/orion-posthog`).
 
 ## Try it without a PostHog project
 

@@ -2,7 +2,7 @@
 
 ## Orion 0.3.0 (unreleased)
 
-Numbered after the recorder's 0.1.0 and 0.2.0 releases in this repository.
+Numbered after the recorder's 0.1.0 and 0.2.0 releases in this repository, which is now `ryanlin10/orion-posthog` (the old `posthog-behavioral-recorder` address redirects).
 
 - Built-in mood reading (`mood: true`): angry, frustrated, calm, anxious, confused or pleased from pointer speed, changes in direction and clicks, with the same heuristics as the demo on paradigmmachines.ai/orion. Labels go to `context()`, `onLabel()` and PostHog as model `orion-mood`; `orion.mood()` reads it.
 - Self-report (`selfReport`): a question in the corner of the page asks how it is going, with two positive and two negative answers picked for the page and the visitor's recent input, and sends `orion_self_report`. Answers become `self_report` labels for the input before the question; they win over every other labeller. `orion.ask()` asks now.

@@ -8,7 +8,7 @@ description: Write and run Orion recipes that turn PostHog input telemetry into 
 ## Setup (once per project folder)
 
 ```sh
-pip install "paradigm-orion[sequence] @ git+https://github.com/ryanlin10/posthog-behavioral-recorder"   # Python 3.11+
+pip install "paradigm-orion[sequence] @ git+https://github.com/ryanlin10/orion-posthog"   # Python 3.11+
 orion init     # asks for the PostHog key and project, the AI labeller (Anthropic, OpenAI or Gemini) and its key,
                # and a TypeSafe key (Jev ranks the self-report answers); keys go to ~/.config/orion/keys.env
 ```
