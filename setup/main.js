@@ -115,6 +115,8 @@ async function setup(args, ui, env, fetch) {
     }
     const go = await ui.confirm({ message: 'Run the PostHog wizard to add it now?', yes: 'Run it', no: 'Not now' });
     if (!go) { ui.outro('Add PostHog first (npx -y @posthog/wizard@latest), then run this again.'); return 1; }
+    // PostHog's wizard refuses to draw in a window under 80×28, so make room before handing over.
+    await ui.roomFor({ columns: 80, rows: 28, message: 'PostHog\'s wizard needs a bigger window' });
     ui.note(c.dim('Handing over to the PostHog wizard. Orion carries on when it finishes.'));
     const { code } = await run('npx', ['-y', '@posthog/wizard@latest', '--install-dir', root], { stdio: 'inherit', cwd: root });
     project = await detect(root);

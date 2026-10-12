@@ -380,3 +380,26 @@ test('main: a saved key that the provider rejects is not used', async () => {
   assert.deepEqual(await before.changes(), [], 'nothing changed');
   await rm(dir, { recursive: true });
 });
+
+test('ui: roomFor waits for a big enough window, and Enter goes on anyway', async () => {
+  const make = () => {
+    const output = new PassThrough();
+    Object.assign(output, { columns: 101, rows: 24 });
+    output.resume();
+    return { input: new PassThrough(), output };
+  };
+  const a = make();
+  const ui = createUI({ ...a, interactive: true, color: false });
+  const waiting = ui.roomFor({ columns: 80, rows: 28, message: 'Bigger' });
+  a.output.rows = 26;
+  a.output.emit('resize');
+  a.output.rows = 30;
+  a.output.emit('resize');
+  assert.equal(await waiting, true);
+
+  const b = make();
+  const pressed = createUI({ ...b, interactive: true, color: false }).roomFor({ columns: 80, rows: 28, message: 'Bigger' });
+  b.input.emit('keypress', '\r', { name: 'return' });
+  assert.equal(await pressed, false);
+  assert.equal(await createUI({ ...make(), interactive: false }).roomFor({ columns: 80, rows: 28, message: 'x' }), true);
+});

@@ -36,7 +36,7 @@ export function createUI({ input = process.stdin, output = process.stdout, inter
   }
 
   // One prompt: draws its frame, redraws it on every key, and leaves a one-line summary behind when answered.
-  function prompt({ message, draw, key, summary }) {
+  function prompt({ message, draw, key, summary, resize }) {
     return new Promise((resolve, reject) => {
       let drawn = 0;
       const paint = (text, final = false) => {
@@ -53,6 +53,7 @@ export function createUI({ input = process.stdin, output = process.stdout, inter
       write('\x1b[?25l');
       const finish = (error, value) => {
         input.off('keypress', onKey);
+        output.off?.('resize', onResize);
         input.setRawMode?.(wasRaw ?? false);
         input.pause();
         if (error) paint(head(c.red(S.cancel), `${rail}  ${c.dim(c.red('Cancelled'))}\n`), true);
@@ -66,7 +67,14 @@ export function createUI({ input = process.stdin, output = process.stdout, inter
         if (result && 'value' in result) return finish(null, result.value);
         render();
       };
+      // A prompt can also answer itself when the window changes size.
+      const onResize = () => {
+        const result = resize?.();
+        if (result && 'value' in result) return finish(null, result.value);
+        render();
+      };
       input.on('keypress', onKey);
+      output.on?.('resize', onResize);
       render();
     });
   }
@@ -173,6 +181,21 @@ export function createUI({ input = process.stdin, output = process.stdout, inter
           else if (str && !k.ctrl && !k.meta && /^[^\x00-\x1f\x7f]+$/.test(str)) value += str;
         },
         summary: v => (secret ? (v ? 'Saved' : 'Skipped') : v || 'Skipped'),
+      });
+    },
+
+    /** Waits until the window is at least columns × rows; resizing goes on by itself, Enter goes on anyway. */
+    async roomFor({ columns, rows, message }) {
+      const size = () => `${output.columns}×${output.rows}`;
+      const fits = () => output.columns >= columns && output.rows >= rows;
+      if (!interactive || !output.rows || fits()) return true;
+      return prompt({
+        message,
+        draw: () => `${rail}  ${c.yellow(`This window is ${size()}; it needs at least ${columns}×${rows}.`)}\n` +
+          `${rail}  ${c.dim('Make it bigger and setup carries on, or press Enter to go on anyway.')}\n`,
+        key: (str, k) => (k.name === 'return' ? { value: false } : undefined),
+        resize: () => (fits() ? { value: true } : undefined),
+        summary: ok => (ok ? `Now ${size()}` : `Going on at ${size()}`),
       });
     },
 
