@@ -13,6 +13,8 @@ Numbered after the recorder's 0.1.0 and 0.2.0 releases in this repository, which
 - `orion deploy` writes to `public/orion` unless told otherwise and prints a snippet that loads `https://cdn.paradigmmachines.ai/orion@0.3.0/orion.js`.
 - Recipes accept `temporal_cnn` for `tcn`, and session alongside user or day in `split.by` (it adds nothing there). An unset `labels.model.llm` uses the model chosen at `orion init`.
 - Fixes: `Orion(posthog_project="<name>")` looks the project up without a project id set; a 400 from an AI provider fails that request instead of the whole labelling run.
+- Setup wizard, `npx github:ryanlin10/orion-posthog`: reads the project, hands over to PostHog's wizard when PostHog is missing, asks what to record, installs the package (or copies the browser files into a plain HTML site), and has an agent add `orion.connect` next to `posthog.init`. The agent is Orion's own (Anthropic, OpenAI or Gemini, on your key; saved keys are checked first) or Claude Code or Codex if one is signed in. Every change is shown as a diff to keep or undo; Ctrl-C puts every file back. It then waits for the first Orion events in PostHog and offers the skills.
+- `connect()` called again for the same PostHog client returns the running connection, so React's double effects and hot reloads no longer record everything twice. `stop()` it to reconnect with other options.
 
 ## Orion 0.1.0
 

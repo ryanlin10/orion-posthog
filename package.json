@@ -18,9 +18,14 @@
     },
     "./auto": "./src/auto.js"
   },
+  "bin": {
+    "orion-setup": "./bin/orion-setup.js"
+  },
   "files": [
     "src",
     "dist",
+    "bin",
+    "setup",
     "LICENSE",
     "README.md",
     "docs",
@@ -35,7 +40,8 @@
     "demo": "node scripts/serve.js",
     "prepack": "npm run build",
     "test:training": ".venv/bin/python -m unittest discover -s test/training -v",
-    "test:python": ".venv/bin/python -m unittest discover -s test/training -v"
+    "test:python": ".venv/bin/python -m unittest discover -s test/training -v",
+    "setup": "node bin/orion-setup.js"
   },
   "devDependencies": {
     "esbuild": "0.25.12",

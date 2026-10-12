@@ -148,5 +148,6 @@ export interface Orion {
   getStats(): RecorderStats & { live: { ticks: number; scored: number; noRead: number; labelsSent: number; errors: number; models: string[]; buffered: number; noReadReasons: Record<string, string | null> } };
 }
 
+/** Attach Orion to a loaded PostHog SDK. A second call for the same PostHog instance returns the running connection; stop() it first to reconnect with other options. */
 export function connect(posthog: PostHogClient, options?: ConnectOptions): Orion;
 export const orion: { connect: typeof connect; version: string };

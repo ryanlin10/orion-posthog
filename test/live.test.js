@@ -136,3 +136,15 @@ test('a score of 0 is a label, not the absence of one', async () => {
   assert.match(live.contextText(), /calm/);
   assert.equal(sent.filter(([name]) => name === 'orion_label').at(-1)?.[1].label, 0);
 });
+
+test('connect: a second call for the same PostHog returns the running connection until it stops', () => {
+  const e = environment();
+  const first = connect(e.posthog, { window: e.win, allowSynthetic: true });
+  const again = connect(e.posthog, { window: e.win, allowSynthetic: true, mask: 'types' });
+  assert.equal(again, first);
+  assert.equal(e.calls.filter(c => c[0] === 'orion_session_start').length, 1, 'one session start, not two');
+  first.stop();
+  const fresh = connect(e.posthog, { window: e.win, allowSynthetic: true });
+  assert.notEqual(fresh, first);
+  fresh.stop();
+});
