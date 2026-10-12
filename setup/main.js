@@ -85,7 +85,21 @@ async function setup(args, ui, env, fetch) {
   const { c } = ui;
   ui.intro('Orion setup', `${VERSION} · runs on your machine`);
   const root = path.resolve(args.dir ?? process.cwd());
-  let project = await detect(root);
+  if (root === os.homedir() || root === path.parse(root).root) {
+    ui.error(`${tilde(root)} is ${root === os.homedir() ? 'your home folder' : 'the top of the disk'}, not an app.`,
+      ['Open your web app\'s folder (cd my-app) and run this again, or pass --dir <path>.']);
+    ui.outro('Nothing changed.');
+    return 1;
+  }
+  // Reading a big project takes a moment; say so rather than sit silent.
+  const read = async () => {
+    const spin = ui.spinner();
+    spin.start('Reading your project');
+    const found = await detect(root);
+    spin.stop(null);
+    return found;
+  };
+  let project = await read();
   const describe = p => [
     tilde(p.root),
     [p.framework, p.packageDir ? p.packageManager : null, p.git.repo ? `git${p.git.dirty ? `, ${p.git.dirty} uncommitted change${p.git.dirty > 1 ? 's' : ''}` : ', clean'}` : null].filter(Boolean).join(' · '),
@@ -117,12 +131,20 @@ async function setup(args, ui, env, fetch) {
     if (!go) { ui.outro('Add PostHog first (npx -y @posthog/wizard@latest), then run this again.'); return 1; }
     // PostHog's wizard refuses to draw in a window under 80×28, so make room before handing over.
     await ui.roomFor({ columns: 80, rows: 28, message: 'PostHog\'s wizard needs a bigger window' });
-    ui.note(c.dim('Handing over to the PostHog wizard. Orion carries on when it finishes.'));
+    ui.step('Handing over to PostHog\'s wizard', [
+      `In its menu choose ${c.bold('Continue')} (installs PostHog). Its other options don't add PostHog.`,
+      c.dim('Orion carries on when it closes.')]);
+    // Ctrl-C there is meant for PostHog's wizard; Orion stays to say what happened.
+    const stay = () => {};
+    process.on('SIGINT', stay);
     const { code } = await run('npx', ['-y', '@posthog/wizard@latest', '--install-dir', root], { stdio: 'inherit', cwd: root });
-    project = await detect(root);
+    process.off('SIGINT', stay);
+    ui.step('Back in Orion setup');
+    project = await read();
     if (!project.posthog.kind) {
-      ui.error(code ? `The PostHog wizard stopped (exit code ${code}).` : 'PostHog still does not start in this app.');
-      ui.outro('Run this again once PostHog is in.');
+      ui.error(code ? `PostHog's wizard stopped (exit code ${code}) before PostHog was added.` : 'PostHog\'s wizard closed without adding PostHog to this app.',
+        [`Run this again and choose Continue in PostHog's menu, or add PostHog yourself (npx -y @posthog/wizard@latest).`]);
+      ui.outro('Nothing changed.');
       return 1;
     }
     ui.step('PostHog is in', describe(project).slice(2));
