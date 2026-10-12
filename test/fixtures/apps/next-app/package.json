@@ -1,0 +1,6 @@
+{
+  "name": "acme-next",
+  "private": true,
+  "scripts": { "dev": "next dev", "build": "next build" },
+  "dependencies": { "next": "15.5.0", "posthog-js": "^1.280.0", "react": "^19.0.0", "react-dom": "^19.0.0" }
+}

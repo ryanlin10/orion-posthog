@@ -23,6 +23,31 @@ Fine-grained input telemetry on top of PostHog, sentiment classifiers trained fr
 Nothing is hosted by Orion except the script itself: training runs on your machine and live labelling runs in your
 visitors' browsers.
 
+## Set up with one command
+
+Run this in your web app's folder:
+
+```sh
+npx github:ryanlin10/orion-posthog
+```
+
+It is a setup wizard with an agent behind it, and nothing changes until you have seen it:
+
+1. It reads the project: framework, package manager, and where PostHog starts. With no PostHog yet, it offers to
+   run PostHog's own wizard (`npx @posthog/wizard`) first, then carries on.
+2. You choose what the keyboard keeps (timing only, key types, or nothing) and the live readings (mood, the
+   self-report question).
+3. An agent adds Orion next to `posthog.init`: Orion's own agent with your Anthropic, OpenAI or Gemini key, or Claude
+   Code or Codex if you have one signed in (no key needed), or you paste the code yourself. Agents read your source
+   files; `.env` files stay closed. Plain HTML sites get Orion's browser files copied in and two script tags.
+4. You see every changed file as a diff and keep it or undo all of it. Ctrl-C at any point puts every file back.
+5. With a PostHog personal API key (`project:read`, `query:read`) it waits until Orion's first events arrive from
+   your browser. It can then add Orion's skills to your coding agents.
+
+Keys you give it are saved in `~/.config/orion/keys.env`, the file `orion init` uses, so the training tools need no
+second setup. `--yes` takes every default without questions, `--agent api|claude|codex|manual` picks who edits,
+and `--help` lists the rest. The wizard sends nothing to Paradigm Machines.
+
 ## Install on your site
 
 ```html

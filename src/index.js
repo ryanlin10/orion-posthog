@@ -16,12 +16,18 @@ async function fetchWith(win, url, read) {
   return read(response);
 }
 
+// One connection per PostHog instance: React runs effects twice in development and bundlers re-run modules on hot
+// reload, so a second connect() returns the running connection instead of recording everything twice.
+const connections = new WeakMap();
+
 /**
  * Attach Orion to a loaded PostHog SDK: capture input, and label sessions live with any models given.
  * options.mask: 'timing' (default), 'types' or 'off'. options.models: model URLs or objects from `orion deploy`.
  * options.mood: true runs the built-in mood reading. options.selfReport: true (or settings) asks people how it is going.
  */
 export function connect(posthog, options = {}) {
+  const running = connections.get(posthog);
+  if (running) return running;
   const win = options.window ?? globalThis.window;
   const live = options.live ?? {};
   const fetchJson = url => fetchWith(win, url, r => r.json());
@@ -58,7 +64,7 @@ export function connect(posthog, options = {}) {
         mood: !!options.mood, self_report: !!options.selfReport });
     } catch { /* the SDK reports its own failures */ }
   }
-  return {
+  const connection = {
     version: VERSION,
     ready,
     load: source => labeller.load(source),
@@ -72,9 +78,11 @@ export function connect(posthog, options = {}) {
     flush: recorder.flush,
     pause() { recorder.pause(); labeller.reset(); report?.hide(); },
     resume: recorder.resume,
-    stop() { report?.stop(); labeller.stop(); recorder.stop(); },
+    stop() { connections.delete(posthog); report?.stop(); labeller.stop(); recorder.stop(); },
     getStats: () => ({ ...recorder.getStats(), live: labeller.stats() }),
   };
+  connections.set(posthog, connection);
+  return connection;
 }
 
 export const orion = { connect, version: VERSION };
