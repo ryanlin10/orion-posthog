@@ -1,5 +1,8 @@
 # Orion
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://github.com/ryanlin10/orion-posthog/actions/workflows/ci.yml/badge.svg)](https://github.com/ryanlin10/orion-posthog/actions/workflows/ci.yml)
+
 Fine-grained input telemetry on top of PostHog, sentiment classifiers trained from it, and live labels for your agents.
 
 - **Connect.** One script after your PostHog snippet. No SDK fork, same sessions, same consent and opt-out.
@@ -189,4 +192,8 @@ npm run test:python           # builder, labellers, providers, export parity, en
 The browser computes the same window features and time steps as the Python builder, and runs exported models
 with the same outputs as scikit-learn and PyTorch; tests check both on generated data.
 
-Independent project; not affiliated with PostHog. MIT licence.
+Independent project; not affiliated with PostHog.
+
+## License
+
+[MIT](LICENSE) © 2026 Ryan Lin
