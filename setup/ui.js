@@ -222,9 +222,11 @@ export function createUI({ input = process.stdin, output = process.stdout, inter
           write(`\r\x1b[K${rail}  ${c.dim(fit(text))}\n`);
           tick();
         },
+        /** Ends the spinner with a done (or failed) line; with no text it leaves nothing behind (in a terminal). */
         stop(text, ok = true) {
           clearInterval(timer);
           if (active === self) active = null;
+          if (text == null) { if (interactive) write('\r\x1b[K\x1b[1A\r\x1b[K\x1b[?25h'); return; }
           const symbol = ok ? c.green(S.done) : c.red(S.cancel);
           write(`${interactive ? '\r\x1b[K' : ''}${symbol}  ${text}\n`);
           if (interactive) write('\x1b[?25h');

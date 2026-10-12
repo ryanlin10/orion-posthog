@@ -403,3 +403,13 @@ test('ui: roomFor waits for a big enough window, and Enter goes on anyway', asyn
   assert.equal(await pressed, false);
   assert.equal(await createUI({ ...make(), interactive: false }).roomFor({ columns: 80, rows: 28, message: 'x' }), true);
 });
+
+test('main: refuses to run in the home folder', async () => {
+  const output = new PassThrough();
+  let printed = '';
+  output.on('data', chunk => { printed += chunk; });
+  const ui = createUI({ input: new PassThrough(), output, interactive: false, color: false });
+  assert.equal(await main(['--dir', os.homedir(), '--yes'], { ui, env: { PATH: '' } }), 1);
+  assert.match(printed, /is your home folder, not an app/);
+  assert.doesNotMatch(printed, /Your project/, 'stops before reading anything');
+});
