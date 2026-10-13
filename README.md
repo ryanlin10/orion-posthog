@@ -1,6 +1,6 @@
 <h1 align="center">Orion</h1>
 
-<h3 align="center">See how your visitors feel from how they type and move the mouse</h3>
+<h3 align="center">See how your users feel from how they type and move the mouse</h3>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
@@ -43,7 +43,7 @@ Recipe format: [orion-datasets skill](skills/orion-datasets/SKILL.md).
 ## Use the labels
 
 ```js
-window.orion.contextText()   // the visitor's current labels, for your agent's prompt
+window.orion.contextText()   // the user's current labels, for your agent's prompt
 ```
 
 ```sh
