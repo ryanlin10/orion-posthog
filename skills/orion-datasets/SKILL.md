@@ -30,7 +30,8 @@ source:
   since: 30d                      # how far back to use pulled data
   pages: [/checkout]              # optional path prefixes
 target:
-  sentiment: [calm, engaged, confused, frustrated]   # or `frustrated: binary`, or `frustration: score(0, 1)`
+  feeling: [calm, pleased, engaged, confident, frustrated, confused, anxious, angry, bored]
+  # all nine of the question's answers (the default), or fewer classes, `frustrated: binary`, `frustration: score(0, 1)`
 window:
   length: 10s                     # 1s to 5m
   align: past                     # text labels: past (while writing), symmetric, or future
@@ -39,10 +40,10 @@ telemetry: [pointer, keyboard, scroll, focus]   # add volume only on purpose: co
 labels:
   by: [self_report, human, model] # people's own answers, the labelling page, AI labellers
   min_confidence: 0.6
-  self_report:                    # optional; defaults to the target's classes when they include 2+ positive and 2+ negative
+  self_report:                    # optional: the question and the answers it chooses from, two of each per visitor
     question: How is it going so far?
-    positive: [calm, engaged]     # the question offers two of each, ranked by `orion survey`
-    negative: [confused, frustrated]
+    positive: [calm, pleased, engaged, confident]       # default: the target's classes when 2+ of each are known
+    negative: [frustrated, confused, anxious, angry, bored]   # feelings; a target of four leaves nothing to choose
   model:
     reads: [text, replay]
     llm: claude-sonnet-5-5        # optional; default is the model chosen at `orion init` (gpt-5.6-sol, gemini-3.8-flash…)

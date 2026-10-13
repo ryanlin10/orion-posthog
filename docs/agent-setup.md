@@ -14,7 +14,7 @@ Orion sits on top of our PostHog. It records fine-grained input timing (never wh
    <you> is claude-code, codex, cursor, github-copilot, gemini-cli or windsurf (npx skills add --help lists the rest). The skills land in .claude/skills/ or .agents/skills/. If your sandbox blocks the install, ask me to run that command in my terminal, and meanwhile read the skills at https://github.com/ryanlin10/orion-posthog/tree/main/skills.
    Then read orion-setup/SKILL.md and follow it step by step. The other orion-* skills cover the later steps.
 2. Look before changing anything. Tell me where PostHog is initialised, how consent works, and where our AI assistant (if any) builds its prompts. If the app has no PostHog, stop and tell me.
-3. Ask me before turning on the in-page question and before deciding what Orion should detect. Decide the rest yourself.
+3. Ask me before turning on the in-page question. Decide the rest yourself with the defaults in orion-setup.
 4. Never ask me to paste API keys into this chat, and never write keys into files. When keys are needed, tell me to run `orion init` in my own terminal.
 5. Check your work as orion-setup describes. Then finish with a short summary in your reply (don't add notes files to the project): what you changed, what I need to do, and what to do once data has arrived.
 ```

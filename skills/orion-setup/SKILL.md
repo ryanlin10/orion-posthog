@@ -16,8 +16,8 @@ Work in two phases. Phase 1 is done today. Phase 2 needs a week or two of real d
 - **Keys never go through you.** Do not ask for API keys in chat and never write keys into files, `.env` files or
   commits. When keys are needed, ask the person to run `orion init` in their own terminal window (it needs a real
   terminal to take keys hidden; run through an agent's shell it skips the questions).
-- **Ask before visible or legal choices:** whether visitors may see the question, what Orion should detect, and how
-  consent works. Do everything else yourself.
+- **Ask before visible or legal choices:** whether visitors may see the question, and how consent works. Do
+  everything else yourself, with the defaults below; do not ask what Orion should detect (step 5).
 - **Consent.** Input timing can identify a person, so treat it as personal data. If the app has a consent banner or
   opt-in, Orion must follow it. Orion already honours PostHog's opt-out.
 - **Never capture key identities.** Keep `mask: 'timing'`: Orion then records when keys go down and up, never which
@@ -93,12 +93,18 @@ labelling, and optionally a TypeSafe key, which ranks the question's answers. Ke
 
 ### 5. Write the first recipe
 
-Ask what Orion should detect if it is not clear from the app. A good default, `recipes/<name>.yaml`:
+Do not ask what Orion should detect. The question already chooses for each visitor: it offers two positive and two
+negative answers out of nine feelings, ranked for the page and the visitor's recent input. Train on all nine, so
+every answer becomes a label, and say in your summary that the target can be narrowed later. (A target of only some
+feelings shrinks the question to those, so every visitor sees the same answers.) The live mood reading's states
+(angry, frustrated, calm, anxious, confused, pleased) are a separate built-in reading, not this target.
+
+`recipes/site-feelings.yaml`:
 ```yaml
-name: site-sentiment
+name: site-feelings
 source: {since: 30d}            # add pages: [/checkout] to focus on one flow
 target:
-  sentiment: [calm, engaged, confused, frustrated]
+  feeling: [calm, pleased, engaged, confident, frustrated, confused, anxious, angry, bored]
 window: {length: 10s, align: past}
 telemetry: [pointer, keyboard, scroll]
 labels:
@@ -112,9 +118,9 @@ The orion-datasets skill documents every setting.
 ### 6. Rank the question's answers (if the question is on)
 
 ```sh
-orion survey recipes/site-sentiment.yaml --out public/orion
+orion survey recipes/site-feelings.yaml --out public/orion
 ```
-Then set `selfReport: { survey: '/orion/site-sentiment-survey.json' }`. Jev (with a TypeSafe key) or the AI labeller
+Then set `selfReport: { survey: '/orion/site-feelings-survey.json' }`. Jev (with a TypeSafe key) or the AI labeller
 picks which two positive and two negative answers fit each page and mood. Run it again once data has been pulled, so
 it knows the real pages.
 
@@ -125,11 +131,11 @@ come back: phase 2, after about two weeks or a few hundred answered questions.
 
 ## Phase 2: once data has arrived
 
-1. `orion pull --since 30d --recipe recipes/site-sentiment.yaml`, then `orion status`.
-2. `orion train recipes/site-sentiment.yaml`, and read the report with the orion-train skill. Do not deploy a model
+1. `orion pull --since 30d --recipe recipes/site-feelings.yaml`, then `orion status`.
+2. `orion train recipes/site-feelings.yaml`, and read the report with the orion-train skill. Do not deploy a model
    whose shuffled-label check fails. With fewer than a few hundred labelled windows, also try
    `--arch logistic` and keep the better validation score.
-3. `orion deploy site-sentiment --context support-agent` (writes to `public/orion`), and add the printed model URL to
+3. `orion deploy site-feelings --context support-agent` (writes to `public/orion`), and add the printed model URL to
    `models: [...]` in the Orion options. Re-run `orion survey … --out public/orion` too.
 4. Give the assistant the labels (orion-context skill): the page sends `window.orion?.context()` with each message,
    and the server checks it (known model and label, confidence a number) before writing its own line into the
