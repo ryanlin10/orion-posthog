@@ -1,7 +1,7 @@
-// The last step: watch PostHog until Orion's first events arrive from the developer's browser. Uses a personal API
-// key (project:read and query:read), the same one `orion pull` uses later, and reads counts only.
+// The last step: watch PostHog until Orion's first events arrive from the developer's browser, with a browser sign-in
+// (posthog-auth.js) or a personal API key; either is the one `orion pull` uses later. Reads counts only.
 export const HOSTS = { us: 'https://us.posthog.com', eu: 'https://eu.posthog.com' };
-export const SCOPES = 'project:read and query:read';
+export const SCOPES = 'project:read, query:read, batch_export:read and batch_export:write';
 
 class PostHogError extends Error {
   constructor(message, status) { super(message); this.status = status; }
@@ -39,6 +39,11 @@ export async function findProject({ key, token, region, fetch = globalThis.fetch
     }
   }
   throw last;
+}
+
+/** One project's details (name, public api_token) as the key or sign-in sees them. */
+export async function projectInfo({ host, key, projectId, fetch = globalThis.fetch }) {
+  return call(fetch, `${host}/api/projects/${projectId}/`, key);
 }
 
 /** Orion events since `seconds` ago: { count, latest, browser, host }. */

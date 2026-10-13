@@ -15,7 +15,7 @@ Orion sits on top of our PostHog. It records fine-grained input timing (never wh
    Then read orion-setup/SKILL.md and follow it step by step. The other orion-* skills cover the later steps.
 2. Look before changing anything. Tell me where PostHog is initialised, how consent works, and where our AI assistant (if any) builds its prompts. If the app has no PostHog, stop and tell me.
 3. Ask me before turning on the in-page question. Decide the rest yourself with the defaults in orion-setup.
-4. Never ask me to paste API keys into this chat, and never write keys into files. When keys are needed, tell me to run `orion init` in my own terminal.
+4. Never ask me to paste API keys into this chat, and never write keys into files. When keys are needed, run `orion init` from the app's folder: it opens a page in my browser where I sign in to PostHog and add the AI key. Then run `orion check`.
 5. Check your work as orion-setup describes. Then finish with a short summary in your reply (don't add notes files to the project): what you changed, what I need to do, and what to do once data has arrived.
 ```
 

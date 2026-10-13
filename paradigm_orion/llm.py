@@ -22,6 +22,10 @@ NAMES = {"anthropic": "Anthropic", "openai": "OpenAI", "gemini": "Gemini"}
 KEY_NAMES = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "gemini": "GEMINI_API_KEY"}
 DEFAULT_MODELS = {"anthropic": "claude-sonnet-5-5", "openai": "gpt-5.6-sol", "gemini": "gemini-3.8-flash"}
 BASE_URLS = {"anthropic": "https://api.anthropic.com", "openai": "https://api.openai.com", "gemini": "https://generativelanguage.googleapis.com"}
+KEY_PAGES = {"anthropic": "https://console.anthropic.com/settings/keys", "openai": "https://platform.openai.com/api-keys",
+             "gemini": "https://aistudio.google.com/apikey"}
+BILLING_PAGES = {"anthropic": "https://console.anthropic.com/settings/billing",
+                 "openai": "https://platform.openai.com/settings/organization/billing", "gemini": "https://console.cloud.google.com/billing"}
 RETRY = (429, 500, 502, 503, 529)  # Busy or briefly down: wait and ask again.
 SETUP = (401, 402, 403, 404)  # Key, billing or model name: asking again cannot help. A 400 fails only that request.
 TYPESAFE_CHECK = {"model": JEV_MODEL, "state": "Orion key check", "questions": {"ok": {
@@ -119,9 +123,15 @@ class Provider:
         """Lists the provider's models, which only works with a valid key."""
         return self.call("GET", self.models_path, attempts=2)
 
+    def ping(self):
+        """The smallest real request (a client made with max_tokens=ping_tokens): the key, the account's credit and
+        the model all have to work for it to succeed."""
+        path, body = self.request("Answer in one word.", "Say OK.")
+        return self.call("POST", path, body, attempts=2)
+
 
 class Anthropic(Provider):
-    provider, models_path = "anthropic", "/v1/models"
+    provider, models_path, ping_tokens = "anthropic", "/v1/models", 1
 
     def headers(self):
         return {"x-api-key": self.api_key, "anthropic-version": "2023-06-01"}
@@ -137,7 +147,7 @@ class Anthropic(Provider):
 
 class OpenAI(Provider):
     """The Responses API. No temperature: reasoning models reject it. store=false keeps prompts off OpenAI's servers."""
-    provider, models_path = "openai", "/v1/models"
+    provider, models_path, ping_tokens = "openai", "/v1/models", 16  # The Responses API's smallest allowance.
 
     def headers(self):
         return {"Authorization": f"Bearer {self.api_key}"}
@@ -157,7 +167,7 @@ class OpenAI(Provider):
 
 
 class Gemini(Provider):
-    provider, models_path, max_tokens = "gemini", "/v1beta/models", 8192
+    provider, models_path, max_tokens, ping_tokens = "gemini", "/v1beta/models", 8192, 64  # Room for a thinking model.
 
     def headers(self):
         return {"x-goog-api-key": self.api_key}
@@ -226,17 +236,34 @@ def failed(name, error):
     return f"Could not check the {name} key ({error})"
 
 
-def verify(provider, key, base=None, sleep=time.sleep):
-    """Checks a key by listing the provider's models. Returns (ok, message); the message never holds the key."""
+def verify(provider, key, model=None, base=None, sleep=time.sleep):
+    """Checks a key with one tiny request to the model it will label with, so a wrong key, an account without credit
+    or a model the key cannot use shows up during setup rather than halfway through labelling.
+    Returns (ok, message); the message never holds the key and says how to fix what failed."""
     if provider not in CLIENTS:
         raise ValueError(f"Unknown provider {provider!r}; use {', '.join(PROVIDERS)}")
     if not key:
-        return False, f"No {NAMES[provider]} key given"
+        return False, f"No {NAMES[provider]} key given. Create one at {KEY_PAGES[provider]}"
+    model = model or DEFAULT_MODELS[provider]
+    client = CLIENTS[provider](model, key, max_tokens=CLIENTS[provider].ping_tokens, sleep=sleep, base=base)
     try:
-        CLIENTS[provider](None, key, sleep=sleep, base=base).check()
+        client.ping()
     except LLMError as error:
-        return False, failed(NAMES[provider], error)
-    return True, f"{NAMES[provider]} accepted the key"
+        return False, explain(provider, model, error)
+    return True, f"{NAMES[provider]} accepted the key and {model} answered"
+
+
+def explain(provider, model, error):
+    """What a failed check means, in words, with the page that fixes it."""
+    name, text = NAMES[provider], str(error).lower()
+    if error.status in (401, 403) or any(w in text for w in ("api key not valid", "api_key_invalid", "invalid x-api-key", "incorrect api key")):
+        return f"{name} did not accept the key ({error.status or 'no answer'}). Create one at {KEY_PAGES[provider]}"
+    if error.status == 402 or any(w in text for w in ("credit balance", "insufficient_quota", "billing", "quota", "resource_exhausted")):
+        return f"{name} accepted the key, but its account cannot pay for requests. Add credit at {BILLING_PAGES[provider]}"
+    if error.status == 404 or ("model" in text and any(w in text for w in ("not found", "does not exist", "not_found"))):
+        return (f"{name} accepted the key, but the model {model} is not available to it. "
+                f"Choose {DEFAULT_MODELS[provider]} or another model the key can use")
+    return f"Could not check the {name} key ({error})"
 
 
 def verify_typesafe(key, base=None, sleep=time.sleep):

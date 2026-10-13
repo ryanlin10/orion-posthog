@@ -32,7 +32,8 @@ nothing. Event contents: [docs/data-format.md](docs/data-format.md).
 
 ```sh
 pip install "paradigm-orion[sequence] @ git+https://github.com/ryanlin10/orion-posthog"   # Python 3.11+
-orion init
+orion init      # sign in to PostHog in your browser and add an AI key; each is checked as you go
+orion check     # what works, and what fixes the rest
 orion pull --since 30d --recipe recipes/checkout-sentiment.yaml
 orion train recipes/checkout-sentiment.yaml
 orion deploy checkout-sentiment

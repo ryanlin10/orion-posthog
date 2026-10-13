@@ -1,21 +1,33 @@
 """`orion init`, the setup step after installing (pip cannot ask questions during an install).
 
-In a terminal it asks for the PostHog host, personal API key and project, the AI labeller and its key, and an
-optional TypeSafe key, checking each key as it goes. Settings are saved to .orion/config.json and keys to the keys
-file outside the project (see credentials.py). Keys are typed hidden and never printed.
+PostHog: signing in with the browser (posthog_auth.py) gives Orion exactly the scopes it needs, for the project the
+person picks on PostHog's own page, so there is no key to paste and no scope to forget. A personal API key still
+works (self-hosted PostHog, a computer without a browser): its scopes are checked before it is saved, and after
+fixing them in PostHog the person checks again without pasting the key twice.
+
+AI labeller and TypeSafe: each key is checked with one tiny real request, so a wrong key, an account without credit
+or a model the key cannot use shows up here, with the page that fixes it.
+
+In a terminal the questions are asked there. Without one (an agent's shell) `orion init` opens a setup page on
+127.0.0.1 in the person's browser instead (setup_page.py), so keys never pass through the agent. Settings go to
+.orion/config.json, keys and sign-ins to files outside the project. Keys are typed hidden and never printed.
 """
 import getpass
 import json
+import os
 import sys
+import webbrowser
+from pathlib import Path
 
-from . import credentials
-from .llm import DEFAULT_MODELS, KEY_NAMES, NAMES, PROVIDERS, LLMSetupError, provider_for, split_model, verify, verify_typesafe
-from .posthog import US_HOST, PostHog, PostHogError
+from . import credentials, posthog_auth
+from .llm import DEFAULT_MODELS, KEY_NAMES, KEY_PAGES, NAMES, PROVIDERS, LLMSetupError, provider_for, split_model, verify, verify_typesafe
+from .posthog import US_HOST, PostHog, PostHogAccessError, PostHogError
 from .workspace import Workspace
 
-# The prompts; tests replace them.
+# The prompts and the browser; tests replace them.
 ask = input
 ask_secret = getpass.getpass
+open_browser = webbrowser.open
 
 POSTHOG_KEY, TYPESAFE_KEY = "POSTHOG_PERSONAL_API_KEY", "TYPESAFE_API_KEY"
 POSTHOG_SCOPES = "project:read, query:read, batch_export:read and batch_export:write"
@@ -23,9 +35,19 @@ POSTHOG_SCOPES = "project:read, query:read, batch_export:read and batch_export:w
 
 def init(args):
     ws = Workspace()
-    if args.no_input or not sys.stdin.isatty():
+    problem = ws.misplaced()
+    if problem:
+        raise ValueError(problem)
+    if args.no_input:
         return save_flags(ws, args)
-    print(f"Setting up Orion for {ws.root}. Press Enter to accept the value in [brackets].")
+    if args.terminal or (sys.stdin.isatty() and not args.browser):
+        return in_terminal(ws, args)
+    from .setup_page import run
+    return run(ws, args)
+
+
+def in_terminal(ws, args):
+    print(f"Setting up Orion for {ws.root.parent}. Press Enter to accept the value in [brackets].")
     try:
         setup_posthog(ws, args)
         setup_labeller(ws, args)
@@ -33,17 +55,22 @@ def init(args):
     except (KeyboardInterrupt, EOFError):
         print("\nStopped. Anything saved above is kept; run `orion init` again to finish.")
         return
-    print("Setup done. Next, `orion pull` exports your telemetry from PostHog.")
+    print("Setup done. `orion check` checks everything again at any time; next, `orion pull` exports your telemetry.")
 
 
 def save_flags(ws, args):
-    """No questions (no terminal, or --no-input): save the flags as given."""
+    """No questions (--no-input): save the flags as given and say what is still missing."""
     model = model_from_flag(args.llm) if args.llm else None
     stored = ws.save_config(posthog_host=args.host, posthog_project=args.project, posthog_ui_host=args.ui_host, llm_model=model)
     print(f"Saved {ws.path('config.json')}: {json.dumps(stored)}")
     found = [name for name in credentials.NAMES if credentials.get(name)]
-    print(f"Keys found: {', '.join(found) or 'none'}. Orion reads them from the environment or {credentials.keys_file()}; "
-          "run `orion init` in a terminal to save them there.")
+    print(f"Keys found: {', '.join(found) or 'none'}. Orion reads them from the environment or {credentials.keys_file()}.")
+    host = stored.get("posthog_host") or US_HOST
+    signed = posthog_auth.login(host, stored.get("posthog_project"))
+    if signed:
+        print(f"Signed in to PostHog at {host} for project {signed['project']}.")
+    print("To sign in to PostHog and add keys, run `orion init` without --no-input: in a terminal it asks there, "
+          "anywhere else it opens a setup page in the browser. `orion check` shows what works.")
 
 
 def model_from_flag(value):
@@ -55,30 +82,132 @@ def model_from_flag(value):
     return value
 
 
+# PostHog
+
 def setup_posthog(ws, args):
     saved = ws.config()
-    host = full_url(args.host or ask_default("PostHog host", saved.get("posthog_host") or US_HOST))
-    found = {}
-    check = None if args.no_check else (lambda key: check_posthog(host, key, found))
-    key = take_key("PostHog personal API key", POSTHOG_KEY, check,
-                   f"Create one at {host}/settings/user-api-keys with the {POSTHOG_SCOPES} scopes.")
-    project = args.project or choose_project(found.get("projects"), saved.get("posthog_project"))
-    save_settings(ws, posthog_host=host, posthog_project=project, posthog_ui_host=args.ui_host)
-    save_keys({POSTHOG_KEY: key})
+    host = full_url(args.host or ask_default("PostHog host", saved.get("posthog_host") or detect_host(ws.root.parent) or US_HOST))
+    project = args.project or saved.get("posthog_project")
+    current = posthog_auth.login(host, project)
+    held = credentials.get(POSTHOG_KEY)
+    if current:
+        answer = ask(f"Signed in to PostHog for project {current['project']}. Keep it (Enter), sign in again (s), "
+                     "or use a personal API key instead (k): ").strip().lower()
+        if not answer.startswith(("s", "k")):
+            save_settings(ws, posthog_host=host, posthog_project=current["project"], posthog_ui_host=args.ui_host)
+            return report_access(host, current["project"])
+        if answer.startswith("s"):
+            return sign_in_here(ws, host, project, args.ui_host)
+    elif held and not args.no_check:
+        # A key saved earlier: say now whether it can do what `orion pull` needs, and offer the one-click fix if not.
+        ok, message, missing, _ = check_posthog_key(host, held)
+        print(f"PostHog personal API key ({credentials.where(POSTHOG_KEY)}): {message}")
+        if ok:
+            if not ask("Keep using it (Enter), or sign in with your browser instead (s): ").strip().lower().startswith("s"):
+                save_settings(ws, posthog_host=host, posthog_project=project, posthog_ui_host=args.ui_host)
+                return report_access(host, project) if project else posthog_key(ws, args, host, project, check_first=False)
+            return sign_in_here(ws, host, project, args.ui_host)
+        answer = ask("Sign in with your browser to fix this (Enter), or paste a personal API key (k): ").strip().lower()
+        if not answer.startswith("k"):
+            return sign_in_here(ws, host, project, args.ui_host)
+    else:
+        answer = ask("Sign in to PostHog in your browser (Enter), or paste a personal API key (k): ").strip().lower()
+        if not answer.startswith("k"):
+            return sign_in_here(ws, host, project, args.ui_host)
+    return posthog_key(ws, args, host, project)
 
 
-def check_posthog(host, key, found):
-    """Lists the projects the key can see, which proves the key and the host work together."""
+def sign_in_here(ws, host, project=None, ui_host=None):
+    """Browser sign-in for this folder: saves the sign-in, the host and the project. Returns the project id."""
+    while True:
+        try:
+            record = posthog_auth.sign_in(host, open_browser=open_browser)
+            break
+        except posthog_auth.SignInError as error:
+            print(f"  {error}")
+            if ask("Try again (Enter), or skip PostHog for now (s): ").strip().lower().startswith("s"):
+                return None
+    if not record["project"]:  # PostHog left the choice to Orion (older PostHog): ask, then keep it under that project.
+        projects = PostHog(host, None, record["access_token"]).projects()
+        record = posthog_auth.save(record, choose_project(projects, project))
+    save_settings(ws, posthog_host=host, posthog_project=record["project"], posthog_ui_host=ui_host)
+    report_access(host, record["project"])
+    return record["project"]
+
+
+def report_access(host, project):
+    try:
+        report = PostHog(host, project).access()
+    except (PostHogError, OSError) as error:
+        print(f"  Could not check PostHog: {error}")
+        return project
+    name = (report["project"] or {}).get("name")
+    if report["missing"] or report["problem"]:
+        print(f"  PostHog: {report['problem'] or 'missing ' + ', '.join(report['missing'])}. `orion pull` will stop until this is fixed.")
+    else:
+        via = "signed in" if report["via"] == "sign-in" else "personal API key"
+        print(f"  PostHog ({via}): Orion can query and pull project {name or project} ({project}).")
+    return project
+
+
+def check_posthog_key(host, key):
+    """(ok, message, missing scopes, projects) for a personal API key. The key describes its own scopes."""
     client = PostHog(host, None, key)
     try:
-        found["projects"] = client.projects()
-    except PostHogError as error:
-        if "HTTP 403" in str(error):
-            return True, "PostHog accepted the key, but it cannot list projects (give it the project:read scope to list them here)."
-        return False, f"PostHog did not accept the key at {host} ({str(error).replace(key, '[key]')})."
-    except (OSError, ValueError) as error:
-        return False, f"Could not reach PostHog at {host} ({getattr(error, 'reason', error)})."
-    return True, f"PostHog accepted the key; it can see {len(found['projects'])} project(s)."
+        current = client.request("GET", "/api/personal_api_keys/@current/")
+    except PostHogAccessError as error:
+        if error.status == 401:
+            return False, f"PostHog did not accept the key at {host}.", [], None
+        return False, str(error).replace(key, "[key]"), [], None
+    except (PostHogError, OSError, ValueError) as error:
+        return False, f"Could not reach PostHog at {host} ({getattr(error, 'reason', error)}).", [], None
+    granted = set(current.get("scopes") or [])
+    missing = [] if "*" in granted else [s for s in posthog_auth.SCOPES if s not in granted]
+    if missing:
+        return (False, f"PostHog accepted the key, but it lacks {', '.join(missing)}; Orion needs {POSTHOG_SCOPES}.",
+                missing, None)
+    projects = client.projects()
+    return True, f"PostHog accepted the key; it has the scopes Orion needs and can see {len(projects)} project(s).", [], projects
+
+
+def posthog_key(ws, args, host, project, check_first=True):
+    """The personal API key route. A key without the right scopes can be fixed in PostHog and checked again here."""
+    held = credentials.get(POSTHOG_KEY)
+    if held:
+        print(f"PostHog personal API key: one is already set ({credentials.where(POSTHOG_KEY)}); press Enter to keep it.")
+    else:
+        print(f"Create one at {host}/settings/user-api-keys with the {POSTHOG_SCOPES} scopes.")
+    typed, key, projects = None, None, None
+    while check_first:
+        if key is None:
+            typed = ask_secret(f"PostHog personal API key (typing is hidden){' [keep]' if held else ''}: ").strip() or None
+            key = typed or held
+            if not key:
+                print("  Skipped the PostHog personal API key.")
+                return None
+        if args.no_check:
+            break
+        ok, message, missing, projects = check_posthog_key(host, key)
+        print(f"  {message}")
+        if ok:
+            break
+        if missing:
+            answer = ask("Add them to the key in PostHog, then press Enter to check again; or sign in with your browser "
+                         "instead (b), paste another key (k), keep it anyway (a), or skip (s): ").strip().lower()
+        else:
+            answer = ask("Paste another key (k), sign in with your browser instead (b), keep it anyway (a), or skip (s) [k]: ").strip().lower() or "k"
+        if answer.startswith("b"):
+            return sign_in_here(ws, host, project, args.ui_host)
+        if answer.startswith("k"):
+            typed, key = None, None
+        elif answer.startswith("a"):
+            break
+        elif answer.startswith("s"):
+            return None
+    project = args.project or choose_project(projects, ws.config().get("posthog_project"))
+    save_settings(ws, posthog_host=host, posthog_project=project, posthog_ui_host=args.ui_host)
+    save_keys({POSTHOG_KEY: typed})
+    return project
 
 
 def choose_project(projects, saved):
@@ -97,6 +226,31 @@ def choose_project(projects, saved):
         print("  Type the project's number (its id), as listed above or shown in PostHog's project settings.")
 
 
+def detect_host(folder, limit=4000):
+    """PostHog's EU or US cloud when the app's own code names one (env files are never read), else None."""
+    skip = {"node_modules", "dist", "build", "out", "venv", "__pycache__", "vendor"}
+    seen = 0
+    for root, dirs, names in os.walk(folder):
+        dirs[:] = [d for d in dirs if d not in skip and not d.startswith(".")]
+        for name in names:
+            if name.startswith(".") or not name.endswith((".js", ".jsx", ".ts", ".tsx", ".mjs", ".html", ".vue", ".svelte", ".astro", ".py")):
+                continue
+            seen += 1
+            if seen > limit:
+                return None
+            try:
+                text = (Path(root) / name).read_text(errors="ignore")[:500_000]
+            except OSError:
+                continue
+            if "eu.i.posthog.com" in text or "eu.posthog.com" in text:
+                return "https://eu.posthog.com"
+            if "us.i.posthog.com" in text or "us.posthog.com" in text:
+                return US_HOST
+    return None
+
+
+# The AI labeller and TypeSafe
+
 def setup_labeller(ws, args):
     saved = ws.config().get("llm_model")
     fixed = args.llm.strip() if args.llm else None
@@ -108,10 +262,12 @@ def setup_labeller(ws, args):
     if provider is None:
         print("  No AI labeller for now; recipes can still use human and self-report labels.")
         return
-    name = KEY_NAMES[provider]
-    check = None if args.no_check else (lambda key: verify(provider, key))
-    key = take_key(f"{NAMES[provider]} API key", name, check)
     model = fixed if fixed and fixed.lower() not in PROVIDERS else ask_model(provider, saved)
+    name = KEY_NAMES[provider]
+    if not credentials.get(name):
+        print(f"Get a {NAMES[provider]} key at {KEY_PAGES[provider]}")
+    check = None if args.no_check else (lambda key: verify(provider, key, split_model(model)[1]))
+    key = take_key(f"{NAMES[provider]} API key", name, check)
     save_settings(ws, llm_model=model)
     save_keys({name: key})
 
@@ -149,29 +305,34 @@ def setup_typesafe(args):
 
 
 def take_key(label, name, check=None, hint=""):
-    """Asks for a key (hidden) until its check passes or the person moves on. Returns a newly typed key, else None."""
+    """Asks for a key (hidden) until its check passes or the person moves on. A key that failed for a reason fixed
+    elsewhere (credit, a scope) can be checked again without typing it twice. Returns a newly typed key, else None."""
     held = credentials.get(name)
     if held:
         print(f"{label}: one is already set ({credentials.where(name)}); press Enter to keep it.")
     elif hint:
         print(hint)
+    typed = key = None
     while True:
-        typed = ask_secret(f"{label} (typing is hidden){' [keep]' if held else ''}: ").strip()
-        key = typed or held
-        if not key:
-            print(f"  Skipped the {label}.")
-            return None
+        if key is None:
+            typed = ask_secret(f"{label} (typing is hidden){' [keep]' if held else ''}: ").strip() or None
+            key = typed or held
+            if not key:
+                print(f"  Skipped the {label}.")
+                return None
         if check is None:
-            return typed or None
+            return typed
         ok, message = check(key)
         print(f"  {message}")
         if ok:
-            return typed or None
-        choice = ask("Try another key (Enter), keep this one anyway (k), or skip (s): ").strip().lower()
+            return typed
+        choice = ask("Paste another key (Enter), check this one again after fixing it (c), keep it anyway (k), or skip (s): ").strip().lower()
         if choice.startswith("k"):
-            return typed or None
+            return typed
         if choice.startswith("s"):
             return None
+        if not choice.startswith("c"):
+            typed = key = None
 
 
 def ask_default(label, default=None):

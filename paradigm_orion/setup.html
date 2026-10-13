@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Orion setup</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f7f7f5; --card: #fff; --fg: #151515; --muted: #6b6b66; --line: #e2e2dc;
+    --ok: #1f7a4d; --bad: #a33a2a; --accent: #151515; --accent-fg: #fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111110; --card: #1a1a19; --fg: #f2f2ee; --muted: #9a9a92; --line: #2e2e2b; --ok: #5cc28f; --bad: #ef8a75;
+      --accent: #f2f2ee; --accent-fg: #111110; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 620px; margin: 0 auto; padding: 40px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; overflow-wrap: anywhere; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-bottom: 14px; }
+  h2 { font-size: 16px; margin: 0 0 4px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .hint { color: var(--muted); font-size: 13.5px; margin: 0 0 8px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
+  input, select { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); }
+  input:focus, select:focus, button:focus-visible, summary:focus-visible { outline: 2px solid var(--muted); outline-offset: 1px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
+  button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-fg); cursor: pointer; }
+  button.quiet { background: transparent; color: var(--fg); border-color: var(--line); }
+  button:disabled { opacity: .55; cursor: default; }
+  .note { margin: 12px 0 0; font-size: 14px; overflow-wrap: anywhere; }
+  .note.ok { color: var(--ok); } .note.bad { color: var(--bad); } .note:empty { display: none; }
+  .badge { font-size: 12px; font-weight: 500; padding: 2px 9px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .badge.ok { color: var(--ok); border-color: currentColor; } .badge.bad { color: var(--bad); border-color: currentColor; }
+  .choices { display: flex; gap: 6px; flex-wrap: wrap; }
+  .choices label { margin: 0; display: flex; gap: 6px; align-items: center; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; color: var(--fg); font-size: 14px; cursor: pointer; }
+  .choices input { width: auto; margin: 0; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 13.5px; margin-top: 14px; }
+  a { color: inherit; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main id="setup">
+  <h1>Orion setup</h1>
+  <p class="sub" id="folder">Loading…</p>
+
+  <section id="posthog" aria-labelledby="ph-title">
+    <h2 id="ph-title">PostHog <span class="badge" id="ph-badge">…</span></h2>
+    <p class="hint">Sign in and choose the project this app sends to. Orion gets read access to that project and may export its events. Nothing to paste.</p>
+    <label for="ph-host">PostHog</label>
+    <select id="ph-host">
+      <option value="https://us.posthog.com">US cloud (us.posthog.com)</option>
+      <option value="https://eu.posthog.com">EU cloud (eu.posthog.com)</option>
+      <option value="other">Self-hosted…</option>
+    </select>
+    <input id="ph-other" placeholder="https://posthog.example.com" aria-label="Self-hosted PostHog address" hidden>
+    <div class="row"><button id="ph-signin">Sign in with PostHog</button></div>
+    <details>
+      <summary>Use a personal API key instead</summary>
+      <label for="ph-key">Personal API key with project:read, query:read, batch_export:read and batch_export:write</label>
+      <input id="ph-key" type="password" autocomplete="off" placeholder="phx_…">
+      <label for="ph-project">Project id</label>
+      <input id="ph-project" inputmode="numeric">
+      <div class="row"><button class="quiet" id="ph-check">Check and save</button></div>
+    </details>
+    <p class="note" id="ph-note" role="status"></p>
+  </section>
+
+  <section id="ai" aria-labelledby="ai-title">
+    <h2 id="ai-title">AI labeller <span class="badge" id="ai-badge">…</span></h2>
+    <p class="hint">Labels windows from the replay timeline and from what people wrote to your AI. Recipes can also use visitors' own answers and your labels.</p>
+    <div class="choices" id="ai-providers" role="radiogroup" aria-label="Provider"></div>
+    <label for="ai-model">Model</label>
+    <input id="ai-model" autocomplete="off">
+    <label for="ai-key">API key · <a id="ai-get" target="_blank" rel="noopener noreferrer">get one</a></label>
+    <input id="ai-key" type="password" autocomplete="off">
+    <div class="row"><button id="ai-check">Check and save</button></div>
+    <p class="note" id="ai-note" role="status"></p>
+  </section>
+
+  <section id="typesafe" aria-labelledby="ts-title">
+    <h2 id="ts-title">TypeSafe <span class="badge" id="ts-badge">optional</span></h2>
+    <p class="hint">Jev ranks which answers the "How is it going?" question offers on each page. Leave it empty to skip.</p>
+    <label for="ts-key">TypeSafe API key</label>
+    <input id="ts-key" type="password" autocomplete="off">
+    <div class="row"><button class="quiet" id="ts-check">Check and save</button></div>
+    <p class="note" id="ts-note" role="status"></p>
+  </section>
+
+  <div class="row">
+    <button id="finish">Finish</button>
+    <span class="hint">Keys are saved on this computer only, readable only by you.</span>
+  </div>
+</main>
+
+<script>
+  const base = location.pathname;  // /s/<secret>/
+  const $ = id => document.getElementById(id);
+  let state = null, filled = false;
+
+  async function post(path, body) {
+    const reply = await fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
+    if (!reply.ok) throw new Error(`HTTP ${reply.status}`);
+    return reply.json();
+  }
+
+  function show(prefix, note, idle) {
+    const el = $(`${prefix}-note`), badge = $(`${prefix}-badge`);
+    el.textContent = note ? note.text : '';
+    el.className = 'note' + (note && note.ok === true ? ' ok' : note && note.ok === false ? ' bad' : '');
+    badge.textContent = !note ? idle : note.ok === true ? 'Ready' : note.ok === false ? 'Needs attention' : 'Skipped';
+    badge.className = 'badge' + (note && note.ok === true ? ' ok' : note && note.ok === false ? ' bad' : '');
+  }
+
+  function provider() {
+    return (document.querySelector('input[name="provider"]:checked') || {}).value;
+  }
+
+  function providerChanged() {
+    const p = provider(), ai = state.ai;
+    const skip = p === 'skip';
+    for (const id of ['ai-model', 'ai-key']) $(id).disabled = skip;
+    if (skip) return;
+    $('ai-model').value = p === ai.provider ? ai.model : ai.defaults[p];
+    $('ai-key').placeholder = ai.saved[p] ? 'A key is saved: leave empty to keep it' : `Paste your ${ai.names[p]} key`;
+    $('ai-get').href = ai.key_pages[p];
+  }
+
+  function render(s) {
+    state = s;
+    $('folder').textContent = `For ${s.folder}`;
+    show('ph', s.posthog.note, s.posthog.signed_in ? 'Signed in' : 'Not set up');
+    $('ph-signin').textContent = s.posthog.signed_in ? 'Sign in again' : 'Sign in with PostHog';
+    show('ai', s.ai.note, s.ai.saved[s.ai.provider] ? 'Key saved' : 'Not set up');
+    show('ts', s.typesafe.note, s.typesafe.saved ? 'Key saved' : 'optional');
+    if (s.pending) {
+      for (const p of ['ph', 'ai', 'ts']) if (!$(`${p}-note`).textContent) $(`${p}-badge`).textContent = 'Checking…';
+    }
+    if (filled) return;
+    filled = true;  // Fill the fields once, so a refresh never overwrites what someone is typing.
+    const known = [...$('ph-host').options].some(o => o.value === s.posthog.host);
+    $('ph-host').value = known ? s.posthog.host : 'other';
+    $('ph-other').hidden = known;
+    if (!known) $('ph-other').value = s.posthog.host;
+    $('ph-project').value = s.posthog.project || '';
+    $('ts-key').placeholder = s.typesafe.saved ? 'A key is saved: leave empty to keep it' : 'Optional';
+    $('ai-providers').innerHTML = '';
+    for (const p of [...Object.keys(s.ai.names), 'skip']) {
+      const label = document.createElement('label');
+      const input = Object.assign(document.createElement('input'), { type: 'radio', name: 'provider', value: p, checked: p === s.ai.provider });
+      input.addEventListener('change', providerChanged);
+      label.append(input, p === 'skip' ? 'None for now' : s.ai.names[p]);
+      $('ai-providers').append(label);
+    }
+    providerChanged();
+  }
+
+  async function refresh() {
+    render(await (await fetch(base + 'state')).json());
+    if (state.pending) setTimeout(refresh, 1200);
+  }
+
+  function host() {
+    return $('ph-host').value === 'other' ? $('ph-other').value.trim() : $('ph-host').value;
+  }
+
+  async function act(button, path, body, clear) {
+    const label = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Checking…';
+    try {
+      render(await post(path, body));
+      if (clear) clear.value = '';
+    } catch (error) {
+      alertNote(path, `Could not reach Orion's setup (${error.message}). Is \`orion init\` still running?`);
+    } finally {
+      button.disabled = false;
+      button.textContent = label;
+    }
+  }
+
+  function alertNote(path, text) {
+    const prefix = path.startsWith('posthog') ? 'ph' : path === 'ai' ? 'ai' : 'ts';
+    show(prefix, { ok: false, text }, '');
+  }
+
+  $('ph-host').addEventListener('change', () => { $('ph-other').hidden = $('ph-host').value !== 'other'; });
+  $('ph-signin').addEventListener('click', () => {
+    if (!host()) return alertNote('posthog', 'Type your PostHog address first.');
+    location.href = `${base}posthog/start?host=${encodeURIComponent(host())}`;
+  });
+  $('ph-check').addEventListener('click', e => act(e.target, 'posthog/key', { host: host(), key: $('ph-key').value, project: $('ph-project').value }, $('ph-key')));
+  $('ai-check').addEventListener('click', e => act(e.target, 'ai', { provider: provider(), model: $('ai-model').value, key: $('ai-key').value }, $('ai-key')));
+  $('ts-check').addEventListener('click', e => act(e.target, 'typesafe', { key: $('ts-key').value }, $('ts-key')));
+  $('finish').addEventListener('click', async () => {
+    const s = await post('done');
+    const line = (name, note) => `${name}: ${note ? note.text : 'not set up'}`;
+    $('setup').innerHTML = '<h1>Orion is set up</h1><p class="sub">You can close this tab. Orion carries on where it was started.</p>';
+    for (const [name, note] of [['PostHog', s.posthog.note], ['AI labeller', s.ai.note], ['TypeSafe', s.typesafe.note]]) {
+      const p = Object.assign(document.createElement('p'), { className: 'note' + (note && note.ok ? ' ok' : note && note.ok === false ? ' bad' : ''), textContent: line(name, note) });
+      $('setup').append(p);
+    }
+  });
+
+  refresh();
+</script>
+</body>
+</html>

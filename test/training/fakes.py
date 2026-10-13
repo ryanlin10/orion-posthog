@@ -16,8 +16,8 @@ def _time(value):
 class FakePostHog:
     """Serves file download exports (create → poll → 302 to a signed URL) and the query API by query name."""
 
-    def __init__(self, rows, project="1", key="phx_test"):
-        self.rows, self.project, self.key = rows, project, key
+    def __init__(self, rows, project="1", key="phx_test", scopes=("*",)):
+        self.rows, self.project, self.key, self.scopes = rows, project, key, list(scopes)
         self.labels = []  # orion_label events, for context and search queries.
         self.cohorts = {}  # cohort id → {"name": ..., "people": set of person ids}
         self.runs, self.requests, self.signed_with_auth = {}, [], 0
@@ -50,6 +50,10 @@ class FakePostHog:
                     return self.reply(200, raw=fake.runs[run]["files"][int(index)])
                 if not self.authorised():
                     return self.reply(401, {"detail": "auth"})
+                if path == "/api/personal_api_keys/@current/":  # The key describes its own scopes.
+                    return self.reply(200, {"scopes": fake.scopes, "scoped_teams": []})
+                if path == f"/api/projects/{fake.project}/":
+                    return self.reply(200, {"id": int(fake.project), "name": "Test project"})
                 m = re.fullmatch(rf"/api/projects/{fake.project}/file_download_batch_exports/(\w+)/", path)
                 if m:
                     run = fake.runs[m.group(1)]
