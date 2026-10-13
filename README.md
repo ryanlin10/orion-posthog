@@ -1,7 +1,11 @@
-# Orion
+<h1 align="center">Orion</h1>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![CI](https://github.com/ryanlin10/orion-posthog/actions/workflows/ci.yml/badge.svg)](https://github.com/ryanlin10/orion-posthog/actions/workflows/ci.yml)
+<h3 align="center">See how your visitors feel from how they type and move the mouse</h3>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="https://github.com/ryanlin10/orion-posthog/actions/workflows/ci.yml"><img src="https://github.com/ryanlin10/orion-posthog/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</p>
 
 Keyboard and pointer telemetry on top of PostHog, sentiment classifiers trained from it, and live labels for your
 agents.
