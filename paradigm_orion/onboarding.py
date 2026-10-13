@@ -161,8 +161,7 @@ def check_posthog_key(host, key):
         return False, str(error).replace(key, "[key]"), [], None
     except (PostHogError, OSError, ValueError) as error:
         return False, f"Could not reach PostHog at {host} ({getattr(error, 'reason', error)}).", [], None
-    granted = set(current.get("scopes") or [])
-    missing = [] if "*" in granted else [s for s in posthog_auth.SCOPES if s not in granted]
+    missing = posthog_auth.missing_scopes(current.get("scopes") or [])
     if missing:
         return (False, f"PostHog accepted the key, but it lacks {', '.join(missing)}; Orion needs {POSTHOG_SCOPES}.",
                 missing, None)

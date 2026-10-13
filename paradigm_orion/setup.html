@@ -108,7 +108,7 @@
     const el = $(`${prefix}-note`), badge = $(`${prefix}-badge`);
     el.textContent = note ? note.text : '';
     el.className = 'note' + (note && note.ok === true ? ' ok' : note && note.ok === false ? ' bad' : '');
-    badge.textContent = !note ? idle : note.ok === true ? 'Ready' : note.ok === false ? 'Needs attention' : 'Skipped';
+    badge.textContent = !note ? idle : note.badge || (note.ok === true ? 'Ready' : note.ok === false ? 'Needs attention' : 'Skipped');
     badge.className = 'badge' + (note && note.ok === true ? ' ok' : note && note.ok === false ? ' bad' : '');
   }
 

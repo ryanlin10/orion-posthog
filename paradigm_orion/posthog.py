@@ -129,12 +129,10 @@ class PostHog:
         report = {"via": kind, "project": None, "missing": [], "problem": None}
         if kind == "sign-in":
             record = posthog_auth.login(self.host, self.project_id or None)
-            granted = set((record.get("scope") or "").split())
-            report["missing"] = [s for s in posthog_auth.SCOPES if s not in granted]
+            report["missing"] = posthog_auth.missing_scopes((record.get("scope") or "").split())
         elif kind == "key":
             key = self.request("GET", "/api/personal_api_keys/@current/")
-            granted = set(key.get("scopes") or [])
-            report["missing"] = [] if "*" in granted else [s for s in posthog_auth.SCOPES if s not in granted]
+            report["missing"] = posthog_auth.missing_scopes(key.get("scopes") or [])
             teams = [str(t) for t in key.get("scoped_teams") or []]
             if teams and self.project_id and self.project_id not in teams:
                 report["problem"] = f"the key is limited to other projects than {self.project_id}"

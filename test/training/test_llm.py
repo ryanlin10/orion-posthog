@@ -209,6 +209,17 @@ class ProviderTests(unittest.TestCase):
             fake = self.serve({("POST", path): [answer]})
             model = {"anthropic": "claude-x", "openai": "gpt-x", "gemini": "gemini-x"}[provider]
             self.assertEqual(verify(provider, "k-123456789012", model, base=fake.url, sleep=self.sleeps.append), (False, expected))
+        # Gemini's free tier runs out after a few requests a day; the part that says so comes late in the reply.
+        long = "You exceeded your current quota, please check your plan and billing details. " + "x" * 400 + \
+            " Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests"
+        fake = self.serve({("POST", "/v1beta/models/gemini-x:generateContent"): [(429, {"error": {"code": 429, "message": long}})]})
+        self.assertEqual(verify("gemini", "k-123456789012", "gemini-x", base=fake.url, sleep=self.sleeps.append),
+                         (False, "The key is on Gemini's free tier, whose few requests a day for gemini-x are used up. Labelling "
+                                 f"needs many more: turn on billing for the key's Google Cloud project at {BILLING_PAGES['gemini']}"))
+        # A busy provider says nothing about the key: not checked (None), rather than failed.
+        fake = self.serve({("POST", "/v1beta/models/gemini-x:generateContent"): [(503, {"error": {"message": "This model is currently experiencing high demand."}})]})
+        self.assertEqual(verify("gemini", "k-123456789012", "gemini-x", base=fake.url, sleep=self.sleeps.append),
+                         (None, "Gemini is busy right now (HTTP 503), so the key could not be checked; try again in a minute"))
 
     def test_verify_typesafe_asks_jev_one_question(self):
         fake = self.serve({("POST", "/v1/systemone"): [keyed("authorization", "ts-good", {"answers": {"ok": True}}, value=lambda k: f"Bearer {k}")]})

@@ -31,6 +31,15 @@ SCOPES = ("project:read", "query:read", "batch_export:read", "batch_export:write
 REFRESH_MARGIN = 120  # Seconds of life left below which a token is refreshed before use.
 
 
+def missing_scopes(granted):
+    """The scopes Orion needs that `granted` lacks, by PostHog's own rule: `*` covers all, X:write covers X:read."""
+    granted = set(granted)
+    if "*" in granted:
+        return []
+    covered = granted | {s[:-len(":write")] + ":read" for s in granted if s.endswith(":write")}
+    return [s for s in SCOPES if s not in covered]
+
+
 class SignInError(RuntimeError):
     pass
 

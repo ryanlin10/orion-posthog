@@ -167,6 +167,14 @@ class SignInTests(unittest.TestCase):
         self.assertEqual(posthog_auth.login(fake.url, "3")["access_token"], "pha_1")
 
 
+class ScopeTests(unittest.TestCase):
+    def test_scopes_follow_posthogs_rule_that_write_covers_read(self):
+        self.assertEqual(posthog_auth.missing_scopes(["*"]), [])
+        self.assertEqual(posthog_auth.missing_scopes(["project:read", "query:read", "batch_export:write"]), [])
+        self.assertEqual(posthog_auth.missing_scopes(["project:write", "query:read", "batch_export:read"]), ["batch_export:write"])
+        self.assertEqual(posthog_auth.missing_scopes([]), list(posthog_auth.SCOPES))
+
+
 class ClientTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()

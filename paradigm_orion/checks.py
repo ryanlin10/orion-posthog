@@ -58,7 +58,7 @@ def check_labeller(ws):
     if not key:
         return {"name": "AI labeller", "ok": False, "detail": f"{model} is chosen but there is no {NAMES[provider]} key", "fix": FIX}
     passed, message = verify(provider, key, name)
-    return {"name": "AI labeller", "ok": passed, "detail": f"{model}: {message}", "fix": None if passed else FIX}
+    return {"name": "AI labeller", "ok": passed, "detail": f"{model}: {message}", "fix": FIX if passed is False else None}
 
 
 def print_checks(rows):

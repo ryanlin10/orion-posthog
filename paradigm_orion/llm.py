@@ -33,9 +33,10 @@ TYPESAFE_CHECK = {"model": JEV_MODEL, "state": "Orion key check", "questions": {
 
 
 class LLMError(RuntimeError):
-    def __init__(self, message, status=None):
+    def __init__(self, message, status=None, detail=""):
         super().__init__(message)
         self.status = status  # The HTTP status, when the API answered with one.
+        self.detail = detail  # The whole reply, key blanked out, for explain(); the message keeps a short piece.
 
 
 class LLMSetupError(LLMError):
@@ -65,10 +66,10 @@ def wait_seconds(retry_after, attempt):
         return min(60, 2 ** attempt * 2)
 
 
-def excerpt(raw, key=None):
-    """A short one-line piece of an error reply, with the key blanked out should the server echo it."""
+def excerpt(raw, key=None, limit=300):
+    """A one-line piece of an error reply (all of it with limit=None), with the key blanked out should the server echo it."""
     text = " ".join(raw.decode(errors="replace").split())
-    return (text.replace(key, "[key]") if key else text)[:300]
+    return (text.replace(key, "[key]") if key else text)[:limit]
 
 
 def send(name, method, url, headers, body=None, key=None, sleep=time.sleep, attempts=6):
@@ -84,7 +85,8 @@ def send(name, method, url, headers, body=None, key=None, sleep=time.sleep, atte
                 sleep(wait_seconds(error.headers.get("retry-after"), attempt))
                 continue
             kind = LLMSetupError if error.code in SETUP else LLMError
-            raise kind(f"{name} API returned HTTP {error.code}: {excerpt(error.read(), key)}", error.code) from None
+            raw = error.read()
+            raise kind(f"{name} API returned HTTP {error.code}: {excerpt(raw, key)}", error.code, excerpt(raw, key, None)) from None
         except OSError as error:  # No connection, DNS, timeouts.
             host = urllib.parse.urlsplit(url).netloc
             raise LLMError(f"Could not reach the {name} API at {host}: {getattr(error, 'reason', error)}") from None
@@ -249,21 +251,27 @@ def verify(provider, key, model=None, base=None, sleep=time.sleep):
     try:
         client.ping()
     except LLMError as error:
-        return False, explain(provider, model, error)
+        return explain(provider, model, error)
     return True, f"{NAMES[provider]} accepted the key and {model} answered"
 
 
 def explain(provider, model, error):
-    """What a failed check means, in words, with the page that fixes it."""
-    name, text = NAMES[provider], str(error).lower()
+    """(ok, message) for a failed check, in words, with the page that fixes it. ok is None when the provider was
+    only busy: the key may be fine, it just could not be checked now."""
+    name, text = NAMES[provider], f"{error} {error.detail}".lower()
     if error.status in (401, 403) or any(w in text for w in ("api key not valid", "api_key_invalid", "invalid x-api-key", "incorrect api key")):
-        return f"{name} did not accept the key ({error.status or 'no answer'}). Create one at {KEY_PAGES[provider]}"
+        return False, f"{name} did not accept the key ({error.status or 'no answer'}). Create one at {KEY_PAGES[provider]}"
+    if "free_tier" in text or "freetier" in text:
+        return False, (f"The key is on {name}'s free tier, whose few requests a day for {model} are used up. Labelling needs "
+                       f"many more: turn on billing for the key's Google Cloud project at {BILLING_PAGES[provider]}")
     if error.status == 402 or any(w in text for w in ("credit balance", "insufficient_quota", "billing", "quota", "resource_exhausted")):
-        return f"{name} accepted the key, but its account cannot pay for requests. Add credit at {BILLING_PAGES[provider]}"
+        return False, f"{name} accepted the key, but its account cannot pay for requests. Add credit at {BILLING_PAGES[provider]}"
     if error.status == 404 or ("model" in text and any(w in text for w in ("not found", "does not exist", "not_found"))):
-        return (f"{name} accepted the key, but the model {model} is not available to it. "
-                f"Choose {DEFAULT_MODELS[provider]} or another model the key can use")
-    return f"Could not check the {name} key ({error})"
+        return False, (f"{name} accepted the key, but the model {model} is not available to it. "
+                       f"Choose {DEFAULT_MODELS[provider]} or another model the key can use")
+    if error.status in RETRY:
+        return None, f"{name} is busy right now (HTTP {error.status}), so the key could not be checked; try again in a minute"
+    return False, f"Could not check the {name} key ({error})"
 
 
 def verify_typesafe(key, base=None, sleep=time.sleep):

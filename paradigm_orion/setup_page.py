@@ -29,6 +29,11 @@ def bad(text):
     return {"ok": False, "text": text}
 
 
+def note(passed, text):
+    """A check's result for the page; a key that could not be checked (the provider was busy) says so."""
+    return {"ok": passed, "text": text, **({"badge": "Not checked"} if passed is None else {})}
+
+
 class Setup:
     """What the page shows and does; the HTTP handler only routes requests here."""
 
@@ -70,10 +75,10 @@ class Setup:
             provider = onboarding.provider_of(self.model)
             if provider and credentials.get(KEY_NAMES[provider]):
                 passed, message = verify(provider, credentials.get(KEY_NAMES[provider]), split_model(self.model)[1])
-                self.notes.setdefault("ai", {"ok": passed, "text": message})
+                self.notes.setdefault("ai", note(passed, message))
             if credentials.get(TYPESAFE_KEY):
                 passed, message = verify_typesafe(credentials.get(TYPESAFE_KEY))
-                self.notes.setdefault("typesafe", {"ok": passed, "text": message})
+                self.notes.setdefault("typesafe", note(passed, message))
         finally:
             self.checking = False
 
@@ -141,7 +146,7 @@ class Setup:
 
     def ai(self, provider, model, key):
         if provider == "skip":
-            self.notes["ai"] = {"ok": None, "text": "No AI labeller for now; recipes can still use self-report and human labels."}
+            self.notes["ai"] = {"ok": None, "badge": "Skipped", "text": "No AI labeller for now; recipes can still use self-report and human labels."}
             return
         if provider not in PROVIDERS:
             self.notes["ai"] = bad("Choose Anthropic, OpenAI or Gemini")
@@ -157,8 +162,8 @@ class Setup:
             passed, message = verify(provider, key, split_model(model)[1])
         except ValueError as error:
             passed, message = False, str(error)
-        self.notes["ai"] = {"ok": passed, "text": message}
-        if passed:
+        self.notes["ai"] = note(passed, message + (". The key is saved; `orion check` checks it again later." if passed is None else ""))
+        if passed is not False:
             if key != credentials.get(KEY_NAMES[provider]):
                 credentials.save({KEY_NAMES[provider]: key})
             self.ws.save_config(llm_model=model)
@@ -167,10 +172,10 @@ class Setup:
     def typesafe(self, key):
         key = (key or "").strip() or credentials.get(TYPESAFE_KEY)
         if not key:
-            self.notes["typesafe"] = {"ok": None, "text": "Skipped (optional)."}
+            self.notes["typesafe"] = {"ok": None, "badge": "Skipped", "text": "Skipped (optional)."}
             return
         passed, message = verify_typesafe(key)
-        self.notes["typesafe"] = {"ok": passed, "text": message}
+        self.notes["typesafe"] = note(passed, message)
         if passed and key != credentials.get(TYPESAFE_KEY):
             credentials.save({TYPESAFE_KEY: key})
 
@@ -270,9 +275,9 @@ def run(ws, args, open_browser=None, wait=None):
         server.shutdown()
         server.server_close()
     for label, key in (("PostHog", "posthog"), ("AI labeller", "ai"), ("TypeSafe", "typesafe")):
-        note = setup.notes.get(key)
-        mark = {True: "ok", False: "needs attention", None: "skipped"}[note["ok"]] if note else "not set up"
-        detail = f" ({note['text']})" if note else ""
+        result = setup.notes.get(key)
+        mark = (result.get("badge") or {True: "ok", False: "needs attention", None: "skipped"}[result["ok"]]).lower() if result else "not set up"
+        detail = f" ({result['text']})" if result else ""
         print(f"{label}: {mark}{detail}")
     if not finished:
         print("The setup page was closed without Finish; what it saved is kept. Run `orion init` again to continue.")
