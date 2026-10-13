@@ -1,6 +1,6 @@
 # Contributing
 
-Run `npm ci` and `npm run check`, and `npm run test:python` with the `.venv` described in the README. Install Chromium with `npx playwright install chromium` if Chrome is unavailable.
+Run `npm ci` and `npm run check`, then `python3.13 -m venv .venv && .venv/bin/pip install -e '.[sequence]' onnxruntime` and `npm run test:python`. Install Chromium with `npx playwright install chromium` if Chrome is unavailable.
 
 Keep production runtime dependencies empty. Add regression tests when changing capture, timestamps, privacy exclusions, identity boundaries, or transport. Never commit real telemetry, tokens, browser profiles, or the `artifacts/` folder. Use generated fixtures in tests and aggregate results for real-data validation.
 
