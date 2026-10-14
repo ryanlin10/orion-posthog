@@ -212,7 +212,7 @@ class InitTests(unittest.TestCase):
         self.assertEqual(len(ask_secret.prompts), 3)  # The key was typed once.
 
     def test_a_google_cloud_key_given_for_gemini_switches_to_vertex_ai(self):
-        google = self.serve(google_cloud_key("AQ.cloud", "gemini-3.8-flash", "gemini-3.8-pro"))
+        google = self.serve(google_key("AQ.cloud", "vertex", "gemini-3.8-flash", "gemini-3.8-pro"))
         urls = {"ORION_GEMINI_URL": google.url, "ORION_VERTEX_URL": google.url}
         code, printed, ask, _ = self.run_init(["--host", "http://127.0.0.1:9", "--project", "3"], asked=["k", "gemini", ""],
                                               typed=["", "AQ.cloud", ""], **urls)
@@ -227,6 +227,20 @@ class InitTests(unittest.TestCase):
         code, printed, _, _ = self.run_init(["--host", "http://127.0.0.1:9", "--project", "3", "--llm", "gemini-3.8-pro"],
                                             asked=["k"], typed=["", "AQ.cloud", ""], **urls)
         self.assertEqual((code, json.loads(self.config.read_text())["llm_model"]), (0, "vertex:gemini-3.8-pro"))
+
+    def test_a_gemini_api_key_given_for_vertex_ai_stays_on_the_gemini_api(self):
+        google = self.serve(google_key("AQ.studio", "gemini", "gemini-3.8-flash"))
+        code, printed, ask, _ = self.run_init(["--host", "http://127.0.0.1:9", "--project", "3"], asked=["k", "vertex", ""],
+                                              typed=["", "AQ.studio", ""], ORION_GEMINI_URL=google.url, ORION_VERTEX_URL=google.url)
+        self.assertEqual(code, 0, printed)
+        self.assertIn("The Gemini API accepted the key and gemini-3.8-flash answered, so Orion will use the Gemini API. Vertex AI "
+                      "refused it. The key's API restrictions leave out Vertex AI, so Google blocks it there. Add "
+                      "aiplatform.googleapis.com to them at https://console.cloud.google.com/apis/credentials, then run `orion init` "
+                      "again to move to Vertex AI.", printed)
+        self.assertEqual(ask.prompts[2], "Model [vertex:gemini-3.8-flash]: ")
+        self.assertEqual(json.loads(self.config.read_text())["llm_model"], "gemini-3.8-flash")
+        self.assertEqual(self.saved_keys(), {"GEMINI_API_KEY": "AQ.studio"})
+        self.assertNotIn("AQ.studio", printed)
 
     def test_saved_keys_are_kept_with_enter(self):
         self.keys.parent.mkdir()
@@ -282,14 +296,14 @@ class InitTests(unittest.TestCase):
         self.assertIsNone(onboarding.detect_host(self.root))
 
 
-def google_cloud_key(key, *models):
-    """Routes for a Google Cloud key that the Gemini API blocks and Vertex AI accepts."""
-    blocked = (403, {"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "Requests to this API generativelanguage.googleapis.com "
-                               "are blocked.", "details": [{"reason": "API_KEY_SERVICE_BLOCKED"}]}})
+def google_key(key, allowed, *models):
+    """Routes for a Google key whose API restrictions allow only one of Google's endpoints: "vertex" or "gemini"."""
+    paths = {"gemini": "/v1beta/models", "vertex": "/v1beta1/publishers/google/models"}
+    blocked = (403, {"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "Requests to this API are blocked.",
+                               "details": [{"reason": "API_KEY_SERVICE_BLOCKED"}]}})
     answer = {"candidates": [{"content": {"role": "model", "parts": [{"text": "OK"}]}}]}
-    routes = {("POST", f"/v1beta/models/{m}:generateContent"): [blocked] for m in models}
-    routes.update({("POST", f"/v1beta1/publishers/google/models/{m}:generateContent"): [keyed("x-goog-api-key", key, answer)] for m in models})
-    return routes
+    return {("POST", f"{path}/{m}:generateContent"): [keyed("x-goog-api-key", key, answer) if provider == allowed else blocked]
+            for provider, path in paths.items() for m in models}
 
 
 class SetupPageTests(unittest.TestCase):
@@ -353,7 +367,7 @@ class SetupPageTests(unittest.TestCase):
             self.assertNotIn(secret, printed)
 
     def test_the_page_moves_a_google_cloud_key_given_for_gemini_to_vertex_ai(self):
-        google = FakeAPI(google_cloud_key("AQ.cloud", "gemini-3.8-flash"))
+        google = FakeAPI(google_key("AQ.cloud", "vertex", "gemini-3.8-flash"))
         self.addCleanup(google.close)
         args = argparse.Namespace(host="http://127.0.0.1:9", project=None, llm=None, ui_host=None)
         with isolated_env(self.root, ORION_HOME=str(self.root / ".orion"), ORION_GEMINI_URL=google.url, ORION_VERTEX_URL=google.url):

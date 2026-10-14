@@ -275,7 +275,7 @@ test('anthropic: a 400 about the fallback beta retries once without it; 401 is a
   assert.deepEqual(providerFor('vertex:gemini-3.8-pro'), ['vertex', 'gemini-3.8-pro']);
 });
 
-test('key check: Vertex AI counts tokens, and a Google Cloud key the Gemini API refuses moves to Vertex AI', async () => {
+test('key check: Vertex AI counts tokens, and a Google key one endpoint refuses moves to the other', async () => {
   const seen = [];
   const google = cloudKey => async (url, init) => {
     seen.push({ url, method: init.method, body: init.body && JSON.parse(init.body) });
@@ -290,6 +290,14 @@ test('key check: Vertex AI counts tokens, and a Google Cloud key the Gemini API 
   assert.equal(moved.provider, 'vertex');
   assert.deepEqual(await checkKey('gemini', 'AQ.dead', { fetch: google('AQ.cloud') }), { ok: false, message: 'Gemini did not accept the key (HTTP 403)' });
   assert.equal((await checkKey('openai', 'sk', { fetch: async () => json({}, 401) })).provider, undefined);
+  // A key whose API restrictions leave out Vertex AI stays on the Gemini API, and the message says what to change.
+  const refuse = reason => json({ error: { status: 'PERMISSION_DENIED', details: [{ reason }] } }, 403);
+  const studio = async url => (url.startsWith('https://generativelanguage.googleapis.com/') ? json({ models: [] }) : refuse('API_KEY_SERVICE_BLOCKED'));
+  assert.deepEqual(await checkKey('vertex', 'AQ.studio', { fetch: studio }), { ok: true, provider: 'gemini', message: 'The Gemini API '
+    + 'accepted the key, so Orion will use it. Vertex AI refused it. The key\'s API restrictions leave out Vertex AI, so Google blocks it '
+    + 'there. Add aiplatform.googleapis.com to them at https://console.cloud.google.com/apis/credentials, then run setup again to move to Vertex AI' });
+  assert.deepEqual(await checkKey('vertex', 'AQ.off', { fetch: async () => refuse('SERVICE_DISABLED') }), { ok: false, message: 'The key\'s '
+    + 'Google Cloud project has the Vertex AI API turned off. Turn it on at https://console.cloud.google.com/apis/library/aiplatform.googleapis.com' });
 });
 
 test('coding agents: Claude Code and Codex events become progress lines and a summary', () => {

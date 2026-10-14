@@ -267,21 +267,26 @@ def setup_labeller(ws, args):
     chosen = {"provider": provider}
     check = None if args.no_check else (lambda key: check_labeller_key(key, split_model(model)[1], chosen))
     key = take_key(f"{NAMES[provider]} API key", KEY_NAMES[provider], check)
-    if chosen["provider"] != provider:  # A Google Cloud key given for Gemini: Vertex AI from here on.
-        provider, key, model = chosen["provider"], chosen["key"], f"{chosen['provider']}:{split_model(model)[1]}"
+    if chosen["provider"] != provider:  # The key works only on Google's other endpoint: that one from here on.
+        provider, key, model = chosen["provider"], chosen["key"], moved(model, chosen["provider"])
     save_settings(ws, llm_model=model)
     save_keys({KEY_NAMES[provider]: key})
 
 
 def check_labeller_key(key, model, chosen):
-    """verify, plus a second try on Vertex AI for a key the Gemini API refuses: Google Cloud keys are often allowed
-    only there. When Vertex AI takes the key, chosen switches to Vertex AI and keeps the key."""
+    """verify, plus a second try on Google's other endpoint for a key the chosen one refuses: Google Cloud keys are
+    often allowed only on Vertex AI, AI Studio keys only on the Gemini API. When the other takes the key, chosen
+    switches to it and keeps the key."""
     ok, message = verify(chosen["provider"], key, model)
-    if ok is not False or chosen["provider"] != "gemini" or not verify("vertex", key, model)[0]:
+    other = {"gemini": "vertex", "vertex": "gemini"}.get(chosen["provider"])
+    if ok is not False or not other or not verify(other, key, model)[0]:
         return ok, message
-    chosen.update(provider="vertex", key=key)
-    return True, (f"That is a Google Cloud key for Vertex AI, not the Gemini API. Vertex AI accepted it and {model} answered, "
-                  "so Orion will run Gemini on Vertex AI.")
+    chosen.update(provider=other, key=key)
+    if other == "vertex":
+        return True, (f"That is a Google Cloud key for Vertex AI, not the Gemini API. Vertex AI accepted it and {model} answered, "
+                      "so Orion will run Gemini on Vertex AI.")
+    return True, (f"The Gemini API accepted the key and {model} answered, so Orion will use the Gemini API. Vertex AI refused it. "
+                  f"{message}, then run `orion init` again to move to Vertex AI.")
 
 
 def choose_provider(saved):
@@ -301,6 +306,12 @@ def ask_model(provider, saved):
     if provider_of(name) == provider or name.partition(":")[0].lower() in PROVIDERS:
         return name
     return f"{provider}:{name}"
+
+
+def moved(model, provider):
+    """The model's name on another provider: bare when the name shows that provider (gemini-*), else provider:name."""
+    name = split_model(model)[1]
+    return name if provider_of(name) == provider else f"{provider}:{name}"
 
 
 def provider_of(model):

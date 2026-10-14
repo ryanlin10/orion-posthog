@@ -163,8 +163,8 @@ class Setup:
             passed, message = onboarding.check_labeller_key(key, split_model(model)[1], chosen)
         except ValueError as error:
             passed, message = False, str(error)
-        if chosen["provider"] != provider:  # A Google Cloud key given for Gemini: Vertex AI from here on.
-            provider, model = chosen["provider"], f"{chosen['provider']}:{split_model(model)[1]}"
+        if chosen["provider"] != provider:  # The key works only on Google's other endpoint: that one from here on.
+            provider, model = chosen["provider"], onboarding.moved(model, chosen["provider"])
         self.notes["ai"] = note(passed, message + (". The key is saved; `orion check` checks it again later." if passed is None else ""))
         if passed is not False:
             if key != credentials.get(KEY_NAMES[provider]):
