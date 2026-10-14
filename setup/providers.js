@@ -1,13 +1,18 @@
-// Tool calling on Anthropic, OpenAI and Gemini with the developer's own key, for Orion's built-in setup agent.
+// Tool calling on Anthropic, OpenAI, Gemini and Gemini on Vertex AI (Google Cloud) with the developer's own key, for
+// Orion's built-in setup agent.
 // Each client keeps the conversation in its provider's own shape and sends replies back unchanged (thinking blocks,
 // reasoning items and thought signatures included), so every provider sees a consistent, append-only history.
-// ORION_ANTHROPIC_URL, ORION_OPENAI_URL and ORION_GEMINI_URL point the clients elsewhere (scheme and host, no /v1).
+// ORION_ANTHROPIC_URL, ORION_OPENAI_URL, ORION_GEMINI_URL and ORION_VERTEX_URL point the clients elsewhere (scheme and
+// host, no /v1).
 
-export const PROVIDERS = ['anthropic', 'openai', 'gemini'];
-export const NAMES = { anthropic: 'Anthropic', openai: 'OpenAI', gemini: 'Gemini' };
-export const KEY_NAMES = { anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY', gemini: 'GEMINI_API_KEY' };
-export const DEFAULT_MODELS = { anthropic: 'claude-opus-5-5', openai: 'gpt-5.6-sol', gemini: 'gemini-3.8-flash' };
-const BASE = { anthropic: 'https://api.anthropic.com', openai: 'https://api.openai.com', gemini: 'https://generativelanguage.googleapis.com' };
+export const PROVIDERS = ['anthropic', 'openai', 'gemini', 'vertex'];
+export const NAMES = { anthropic: 'Anthropic', openai: 'OpenAI', gemini: 'Gemini', vertex: 'Vertex AI' };
+export const KEY_NAMES = { anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY', gemini: 'GEMINI_API_KEY', vertex: 'VERTEX_API_KEY' };
+export const DEFAULT_MODELS = { anthropic: 'claude-opus-5-5', openai: 'gpt-5.6-sol', gemini: 'gemini-3.8-flash', vertex: 'gemini-3.8-flash' };
+const BASE = { anthropic: 'https://api.anthropic.com', openai: 'https://api.openai.com', gemini: 'https://generativelanguage.googleapis.com',
+  vertex: 'https://aiplatform.googleapis.com' };
+// Vertex AI takes the Gemini API's requests at another path; with an API key it needs no project or region in it.
+const MODELS_PATH = { gemini: '/v1beta/models', vertex: '/v1beta1/publishers/google/models' };
 const RETRY = new Set([408, 429, 500, 502, 503, 504, 529]);
 
 export class ProviderError extends Error {
@@ -20,7 +25,7 @@ export function providerFor(model) {
   if (/^claude-/i.test(model)) return ['anthropic', model];
   if (/^(gpt-|chatgpt-|o\d)/i.test(model)) return ['openai', model];
   if (/^gemini-/i.test(model)) return ['gemini', model];
-  throw new ProviderError(`Cannot tell which provider serves ${model}: use a claude-*, gpt-* or gemini-* name, or put anthropic:, openai: or gemini: in front`);
+  throw new ProviderError(`Cannot tell which provider serves ${model}: use a claude-*, gpt-* or gemini-* name, or put anthropic:, openai:, gemini: or vertex: in front`);
 }
 
 const base = (provider, env = process.env) => (env[`ORION_${provider.toUpperCase()}_URL`] || BASE[provider]).replace(/\/+$/, '');
@@ -113,7 +118,7 @@ export function createClient({ provider, model, key, system, prompt, tools, fetc
       },
     };
   }
-  if (provider === 'gemini') {
+  if (provider === 'gemini' || provider === 'vertex') {
     const contents = [{ role: 'user', parts: [{ text: prompt }] }];
     let pending = [];  // the last reply's function calls, answered in the same order
     return {
@@ -122,7 +127,7 @@ export function createClient({ provider, model, key, system, prompt, tools, fetc
           contents.push({ role: 'user', parts: results.map((r, i) => ({ functionResponse: {
             name: r.name, ...(pending[i]?.id && { id: pending[i].id }), response: r.error ? { error: r.output } : { result: r.output } } })) });
         }
-        const reply = await post('Gemini', `${base('gemini', env)}/v1beta/models/${encodeURIComponent(model)}:generateContent`, { 'x-goog-api-key': key }, {
+        const reply = await post(NAMES[provider], `${base(provider, env)}${MODELS_PATH[provider]}/${encodeURIComponent(model)}:generateContent`, { 'x-goog-api-key': key }, {
           systemInstruction: { parts: [{ text: system }] }, contents,
           tools: [{ functionDeclarations: tools.map(t => ({ name: t.name, description: t.description, parameters: geminiSchema(t.parameters) })) }],
           generationConfig: { maxOutputTokens: 16000 },
@@ -141,14 +146,21 @@ export function createClient({ provider, model, key, system, prompt, tools, fetc
   throw new ProviderError(`Unknown provider ${provider}`);
 }
 
-/** Checks a key by listing the provider's models, which needs a valid key and costs nothing. */
+/** Checks a key by listing the provider's models, which needs a valid key and costs nothing. Vertex AI lists no models
+ * for an API key, so its check counts tokens instead (also free). A key the Gemini API refuses gets a second check on
+ * Vertex AI, since Google Cloud keys are often allowed only there; then the result says provider: 'vertex'. */
 export async function checkKey(provider, key, { fetch = globalThis.fetch, env } = {}) {
-  const url = { anthropic: '/v1/models', openai: '/v1/models', gemini: '/v1beta/models' }[provider];
+  const url = { anthropic: '/v1/models', openai: '/v1/models', gemini: '/v1beta/models',
+    vertex: `${MODELS_PATH.vertex}/${DEFAULT_MODELS.vertex}:countTokens` }[provider];
   const headers = { anthropic: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, openai: { authorization: `Bearer ${key}` },
-    gemini: { 'x-goog-api-key': key } }[provider];
+    gemini: { 'x-goog-api-key': key }, vertex: { 'x-goog-api-key': key, 'content-type': 'application/json' } }[provider];
+  const body = provider === 'vertex' ? JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Orion key check' }] }] }) : undefined;
   try {
-    const response = await fetch(base(provider, env) + url, { headers, signal: AbortSignal.timeout(8000) });
+    const response = await fetch(base(provider, env) + url, { method: body ? 'POST' : 'GET', headers, body, signal: AbortSignal.timeout(8000) });
     if (response.ok) return { ok: true, message: `${NAMES[provider]} accepted the key` };
+    if (provider === 'gemini' && (await checkKey('vertex', key, { fetch, env })).ok) {
+      return { ok: true, provider: 'vertex', message: 'That is a Google Cloud key for Vertex AI, not the Gemini API, so Orion will run Gemini on Vertex AI' };
+    }
     return { ok: false, message: `${NAMES[provider]} did not accept the key (HTTP ${response.status})` };
   } catch (error) {
     return { ok: false, message: `Could not reach ${NAMES[provider]} (${error.cause?.code ?? error.message})` };

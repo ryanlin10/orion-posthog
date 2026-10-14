@@ -9,7 +9,7 @@ import re
 import tempfile
 from pathlib import Path
 
-NAMES = ("POSTHOG_PERSONAL_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "TYPESAFE_API_KEY")
+NAMES = ("POSTHOG_PERSONAL_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "VERTEX_API_KEY", "TYPESAFE_API_KEY")
 ALIASES = {"GEMINI_API_KEY": ("GOOGLE_API_KEY",)}  # Also accepted when reading.
 NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 

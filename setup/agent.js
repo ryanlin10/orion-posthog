@@ -1,5 +1,5 @@
 // Orion's own setup agent: a language model with six tools (list, read, search, edit, create, ask), confined to the
-// project by the workspace in files.js. It runs on the developer's own Anthropic, OpenAI or Gemini key.
+// project by the workspace in files.js. It runs on the developer's own Anthropic, OpenAI, Gemini or Vertex AI key.
 import { ToolError } from './files.js';
 import { createClient, ProviderError } from './providers.js';
 

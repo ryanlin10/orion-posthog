@@ -15,7 +15,7 @@ import { findKey, readKeys, saveKeys } from '../setup/keys.js';
 import { main } from '../setup/main.js';
 import { accessToken, authFile, loginFor, SCOPES as SIGN_IN_SCOPES, signIn } from '../setup/posthog-auth.js';
 import { detect, installCommand, posthogPlaces, vendorDir } from '../setup/project.js';
-import { createClient, providerFor } from '../setup/providers.js';
+import { checkKey, createClient, providerFor } from '../setup/providers.js';
 import { createUI } from '../setup/ui.js';
 import { findProject, orionEvents, waitForEvents } from '../setup/verify.js';
 
@@ -192,12 +192,12 @@ function fakeProvider(provider) {
   return { fetch, requests };
 }
 
-for (const provider of ['anthropic', 'openai', 'gemini']) {
+for (const provider of ['anthropic', 'openai', 'gemini', 'vertex']) {
   test(`agent on ${provider}: tools run in the project and replies go back in the provider's own format`, async () => {
     const dir = await copyApp('vite-react');
     const { fetch, requests } = fakeProvider(provider);
     const steps = [];
-    const result = await runAgent({ provider, model: { anthropic: 'claude-opus-5-5', openai: 'gpt-5.6-sol', gemini: 'gemini-3.8-flash' }[provider],
+    const result = await runAgent({ provider, model: { anthropic: 'claude-opus-5-5', openai: 'gpt-5.6-sol', gemini: 'gemini-3.8-flash', vertex: 'gemini-3.8-flash' }[provider],
       key: 'test-key', brief: 'Add Orion', workspace: createWorkspace(dir), ask: async () => null, onStep: s => steps.push(s), fetch });
     assert.equal(result.summary, SCRIPT[2]);
     assert.equal(result.turns, 3);
@@ -226,7 +226,8 @@ for (const provider of ['anthropic', 'openai', 'gemini']) {
       assert.equal(second.input.at(-1).call_id, 'call_1_1');
       assert.equal(third.input.at(-1).output, 'Edited src/main.tsx');
     } else {
-      assert.match(requests[0].url, /\/v1beta\/models\/gemini-3\.8-flash:generateContent$/);
+      assert.equal(requests[0].url, provider === 'gemini' ? 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent'
+        : 'https://aiplatform.googleapis.com/v1beta1/publishers/google/models/gemini-3.8-flash:generateContent');
       assert.equal(requests[0].headers['x-goog-api-key'], 'test-key');
       assert.ok(!JSON.stringify(requests[0].body.tools).includes('additionalProperties'));
       assert.equal(second.contents[1].parts[0].thoughtSignature, 'ts-1', 'thought signatures go back unchanged');
@@ -271,6 +272,24 @@ test('anthropic: a 400 about the fallback beta retries once without it; 401 is a
   assert.doesNotMatch(error.message, /sk-secret-value/, 'the key never shows in a message');
   assert.deepEqual(providerFor('openai:my-model'), ['openai', 'my-model']);
   assert.deepEqual(providerFor('gemini-3.8-flash'), ['gemini', 'gemini-3.8-flash']);
+  assert.deepEqual(providerFor('vertex:gemini-3.8-pro'), ['vertex', 'gemini-3.8-pro']);
+});
+
+test('key check: Vertex AI counts tokens, and a Google Cloud key the Gemini API refuses moves to Vertex AI', async () => {
+  const seen = [];
+  const google = cloudKey => async (url, init) => {
+    seen.push({ url, method: init.method, body: init.body && JSON.parse(init.body) });
+    if (url.startsWith('https://generativelanguage.googleapis.com/')) return json({ error: { status: 'PERMISSION_DENIED' } }, 403);
+    return init.headers['x-goog-api-key'] === cloudKey ? json({ totalTokens: 3 }) : json({ error: { status: 'PERMISSION_DENIED' } }, 403);
+  };
+  assert.deepEqual(await checkKey('vertex', 'AQ.cloud', { fetch: google('AQ.cloud') }), { ok: true, message: 'Vertex AI accepted the key' });
+  assert.deepEqual(seen[0], { url: 'https://aiplatform.googleapis.com/v1beta1/publishers/google/models/gemini-3.8-flash:countTokens', method: 'POST',
+    body: { contents: [{ role: 'user', parts: [{ text: 'Orion key check' }] }] } });
+  const moved = await checkKey('gemini', 'AQ.cloud', { fetch: google('AQ.cloud') });
+  assert.equal(moved.ok, true);
+  assert.equal(moved.provider, 'vertex');
+  assert.deepEqual(await checkKey('gemini', 'AQ.dead', { fetch: google('AQ.cloud') }), { ok: false, message: 'Gemini did not accept the key (HTTP 403)' });
+  assert.equal((await checkKey('openai', 'sk', { fetch: async () => json({}, 401) })).provider, undefined);
 });
 
 test('coding agents: Claude Code and Codex events become progress lines and a summary', () => {
