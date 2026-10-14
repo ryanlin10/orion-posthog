@@ -223,7 +223,14 @@ class ProviderTests(unittest.TestCase):
                   (403, {"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "Agent Platform API has not been used in project 1 "
                          "before or it is disabled.", "details": [{"reason": "SERVICE_DISABLED", "domain": "googleapis.com"}]}}),
                   "The key's Google Cloud project has the Vertex AI API turned off. Turn it on at "
-                  "https://console.cloud.google.com/apis/library/aiplatform.googleapis.com, then check again")]
+                  "https://console.cloud.google.com/apis/library/aiplatform.googleapis.com, then check again"),
+                 # A key's own API restrictions can leave the API out even when the project has it on.
+                 ("vertex", "/v1beta1/publishers/google/models/gemini-x:generateContent",
+                  (403, {"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "Requests to this API aiplatform.googleapis.com "
+                         "method google.cloud.aiplatform.v1beta1.PredictionService.GenerateContent are blocked.",
+                         "details": [{"reason": "API_KEY_SERVICE_BLOCKED", "domain": "googleapis.com"}]}}),
+                  "The key's API restrictions leave out Vertex AI, so Google blocks it there. Add aiplatform.googleapis.com to them "
+                  "at https://console.cloud.google.com/apis/credentials")]
         for provider, path, answer, expected in cases:
             fake = self.serve({("POST", path): [answer]})
             model = {"anthropic": "claude-x", "openai": "gpt-x", "gemini": "gemini-x", "vertex": "gemini-x"}[provider]

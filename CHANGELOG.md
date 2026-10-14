@@ -56,6 +56,12 @@ existing recipes and deployed models are unchanged.
   `features.exclude` line), the reference trainer `examples/training/train_classifier.py` with `logistic.json` (a weaker
   copy of `orion train`), and the synthetic `make_demo.py`, whose labels were unrelated to its input. Recipes are no
   longer in the npm package.
+- Vertex AI: the AI labellers and the setup wizard's agent run Gemini on Vertex AI with a Google Cloud API key, billed
+  through Google Cloud (`vertex`, key `VERTEX_API_KEY`, models `vertex:<model>`). Google serves Gemini at
+  two endpoints and a key may be allowed on only one, so a key one refuses is tried on the other: a Google Cloud key
+  typed in for Gemini moves setup to Vertex AI, and a Gemini API key typed in for Vertex AI stays on the Gemini API.
+  When Google refuses a key because its project has the API turned off or the key's API restrictions leave it out,
+  setup says which, with the page that changes it.
 
 ## Orion 0.3.0
 
@@ -66,7 +72,7 @@ Numbered after the recorder's 0.1.0 and 0.2.0 releases in this repository, which
 - `orion survey <recipe>`: Jev (TypeSafe) ranks the answers for each page and mood ahead of time into a survey file that `orion deploy` ships; without a TypeSafe key the AI labeller's model ranks them.
 - `orion init` signs in to PostHog in the browser (OAuth with PKCE, like PostHog's own CLI): PostHog's page asks which project, and the sign-in carries exactly the scopes `orion pull` needs, so there is no key to paste and no scope to forget. Tokens refresh by themselves and live in `~/.config/orion/posthog-auth.json` (mode 600). A personal API key still works; its scopes are checked when it is entered or found, and after fixing them in PostHog it is checked again without pasting it twice.
 - `orion init` from an agent's shell opens a setup page on 127.0.0.1 in the person's browser to sign in and add keys, so keys never pass through the agent or a chat. In a terminal it asks there (`--browser` or `--terminal` to choose).
-- AI keys are checked with one tiny request to the model they will label with, so a wrong key, an account without credit or a model the key cannot use shows up during setup, with the page that fixes it. Keys live in `~/.config/orion/keys.env` (mode 600). The AI labellers run on Anthropic, OpenAI, Gemini, or Gemini on Vertex AI with a Google Cloud key (`vertex`, key `VERTEX_API_KEY`, models `vertex:<model>`); a Google Cloud key typed in for Gemini that only Vertex AI accepts switches setup to Vertex AI by itself.
+- AI keys are checked with one tiny request to the model they will label with, so a wrong key, an account without credit or a model the key cannot use shows up during setup, with the page that fixes it. Keys live in `~/.config/orion/keys.env` (mode 600). The AI labellers run on Anthropic, OpenAI or Gemini.
 - `orion check` (and `--json`): the folder, PostHog access, the AI key and the TypeSafe key, live, each with its fix.
 - `orion pull` checks PostHog access before it creates any export, and in a terminal offers to sign in and carry on.
 - Orion finds `.orion/` in a parent folder (like git) and refuses to set up in the home folder or at the top of the disk.
@@ -76,7 +82,7 @@ Numbered after the recorder's 0.1.0 and 0.2.0 releases in this repository, which
 - `orion deploy` writes to `public/orion` unless told otherwise and prints a snippet that loads `https://cdn.paradigmmachines.ai/orion@0.3.0/orion.js`.
 - Recipes accept `temporal_cnn` for `tcn`, and session alongside user or day in `split.by` (it adds nothing there). An unset `labels.model.llm` uses the model chosen at `orion init`.
 - Fixes: `Orion(posthog_project="<name>")` looks the project up without a project id set; a 400 from an AI provider fails that request instead of the whole labelling run.
-- Setup wizard, `npx github:ryanlin10/orion-posthog`: reads the project, hands over to PostHog's wizard when PostHog is missing, asks what to record, installs the package (or copies the browser files into a plain HTML site), and has an agent add `orion.connect` next to `posthog.init`. The agent is Orion's own (Anthropic, OpenAI, Gemini or Vertex AI, on your key; saved keys are checked first) or Claude Code or Codex if one is signed in. Every change is shown as a diff to keep or undo; Ctrl-C puts every file back. It then waits for the first Orion events in PostHog and offers the skills.
+- Setup wizard, `npx github:ryanlin10/orion-posthog`: reads the project, hands over to PostHog's wizard when PostHog is missing, asks what to record, installs the package (or copies the browser files into a plain HTML site), and has an agent add `orion.connect` next to `posthog.init`. The agent is Orion's own (Anthropic, OpenAI or Gemini, on your key; saved keys are checked first) or Claude Code or Codex if one is signed in. Every change is shown as a diff to keep or undo; Ctrl-C puts every file back. It then waits for the first Orion events in PostHog and offers the skills.
 - `connect()` called again for the same PostHog client returns the running connection, so React's double effects and hot reloads no longer record everything twice. `stop()` it to reconnect with other options.
 
 ## Orion 0.1.0

@@ -146,10 +146,27 @@ export function createClient({ provider, model, key, system, prompt, tools, fetc
   throw new ProviderError(`Unknown provider ${provider}`);
 }
 
+// Google serves Gemini at two endpoints and each key may be allowed on only one: Google Cloud keys often only on Vertex
+// AI, AI Studio keys only on the Gemini API.
+const GOOGLE_OTHER = { gemini: 'vertex', vertex: 'gemini' };
+const API_IDS = { gemini: 'generativelanguage.googleapis.com', vertex: 'aiplatform.googleapis.com' };
+
+/** Why a provider refused a key, with the Google Cloud page that fixes it when there is one. */
+function refusal(provider, status, text) {
+  const api = API_IDS[provider];
+  if (api && text.includes('SERVICE_DISABLED')) {
+    return `The key's Google Cloud project has the ${NAMES[provider]} API turned off. Turn it on at https://console.cloud.google.com/apis/library/${api}`;
+  }
+  if (api && text.includes('API_KEY_SERVICE_BLOCKED')) {
+    return `The key's API restrictions leave out ${NAMES[provider]}, so Google blocks it there. Add ${api} to them at https://console.cloud.google.com/apis/credentials`;
+  }
+  return `${NAMES[provider]} did not accept the key (HTTP ${status})`;
+}
+
 /** Checks a key by listing the provider's models, which needs a valid key and costs nothing. Vertex AI lists no models
- * for an API key, so its check counts tokens instead (also free). A key the Gemini API refuses gets a second check on
- * Vertex AI, since Google Cloud keys are often allowed only there; then the result says provider: 'vertex'. */
-export async function checkKey(provider, key, { fetch = globalThis.fetch, env } = {}) {
+ * for an API key, so its check counts tokens instead (also free). A key one Google endpoint refuses gets a second check
+ * on the other; when that one takes it, the result names it as provider. */
+export async function checkKey(provider, key, { fetch = globalThis.fetch, env, other = GOOGLE_OTHER[provider] } = {}) {
   const url = { anthropic: '/v1/models', openai: '/v1/models', gemini: '/v1beta/models',
     vertex: `${MODELS_PATH.vertex}/${DEFAULT_MODELS.vertex}:countTokens` }[provider];
   const headers = { anthropic: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, openai: { authorization: `Bearer ${key}` },
@@ -158,10 +175,13 @@ export async function checkKey(provider, key, { fetch = globalThis.fetch, env } 
   try {
     const response = await fetch(base(provider, env) + url, { method: body ? 'POST' : 'GET', headers, body, signal: AbortSignal.timeout(8000) });
     if (response.ok) return { ok: true, message: `${NAMES[provider]} accepted the key` };
-    if (provider === 'gemini' && (await checkKey('vertex', key, { fetch, env })).ok) {
-      return { ok: true, provider: 'vertex', message: 'That is a Google Cloud key for Vertex AI, not the Gemini API, so Orion will run Gemini on Vertex AI' };
+    const refused = refusal(provider, response.status, await response.text());
+    if (other && (await checkKey(other, key, { fetch, env, other: null })).ok) {
+      return { ok: true, provider: other, message: other === 'vertex'
+        ? 'That is a Google Cloud key for Vertex AI, not the Gemini API, so Orion will run Gemini on Vertex AI'
+        : `The Gemini API accepted the key, so Orion will use it. Vertex AI refused it. ${refused}, then run setup again to move to Vertex AI` };
     }
-    return { ok: false, message: `${NAMES[provider]} did not accept the key (HTTP ${response.status})` };
+    return { ok: false, message: refused };
   } catch (error) {
     return { ok: false, message: `Could not reach ${NAMES[provider]} (${error.cause?.code ?? error.message})` };
   }

@@ -275,6 +275,9 @@ def explain(provider, model, error):
     name, text = NAMES[provider], f"{error} {error.detail}".lower()
     if provider in API_PAGES and "service_disabled" in text:
         return False, f"The key's Google Cloud project has the {name} API turned off. Turn it on at {API_PAGES[provider]}, then check again"
+    if provider in API_PAGES and "api_key_service_blocked" in text:
+        return False, (f"The key's API restrictions leave out {name}, so Google blocks it there. "
+                       f"Add {API_PAGES[provider].rsplit('/', 1)[1]} to them at {KEY_PAGES['vertex']}")
     if error.status in (401, 403) or any(w in text for w in ("api key not valid", "api_key_invalid", "invalid x-api-key", "incorrect api key")):
         return False, f"{name} did not accept the key ({error.status or 'no answer'}). Create one at {KEY_PAGES[provider]}"
     if "free_tier" in text or "freetier" in text:
