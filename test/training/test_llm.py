@@ -126,7 +126,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(sent["headers"]["x-goog-api-key"], "AIza-test")
         self.assertEqual(sent["body"], {"systemInstruction": {"parts": [{"text": "sys"}]},
                                         "contents": [{"role": "user", "parts": [{"text": "prompt"}]}],
-                                        "generationConfig": {"temperature": 0, "maxOutputTokens": 8192}})
+                                        "generationConfig": {"temperature": 0, "maxOutputTokens": 32768}})
 
     def test_vertex_sends_the_gemini_request_to_vertex_ai_with_the_key_alone(self):
         reply = {"candidates": [{"content": {"role": "model", "parts": [{"text": "[\"calm\"]"}]}}]}
@@ -136,12 +136,20 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(sent["headers"]["x-goog-api-key"], "AQ.test")
         self.assertEqual(sent["body"], {"systemInstruction": {"parts": [{"text": "sys"}]},
                                         "contents": [{"role": "user", "parts": [{"text": "prompt"}]}],
-                                        "generationConfig": {"temperature": 0, "maxOutputTokens": 8192}})
+                                        "generationConfig": {"temperature": 0, "maxOutputTokens": 32768}})
         self.assertEqual(Vertex("gemini-test", "k").base, "https://aiplatform.googleapis.com")
 
     def test_gemini_blocked_prompt_is_an_error(self):
         fake = self.serve({("POST", "/v1beta/models/gemini-test:generateContent"): [(200, {"promptFeedback": {"blockReason": "SAFETY"}})]})
         with self.assertRaisesRegex(LLMError, "SAFETY"):
+            Gemini("gemini-test", "AIza-test", base=fake.url).complete("s", "p")
+
+    def test_gemini_answer_cut_off_by_thinking_is_an_error(self):
+        # Thinking shares maxOutputTokens with the answer; a cut-off JSON array is no use to a labeller.
+        reply = {"candidates": [{"finishReason": "MAX_TOKENS", "content": {"role": "model", "parts": [{"text": '[{"window": 0, "sentim'}]}}],
+                 "usageMetadata": {"promptTokenCount": 734, "candidatesTokenCount": 300, "thoughtsTokenCount": 32468}}
+        fake = self.serve({("POST", "/v1beta/models/gemini-test:generateContent"): [(200, reply)]})
+        with self.assertRaisesRegex(LLMError, r"^Gemini ran out of output tokens before finishing its answer \(32468 went to thinking\)$"):
             Gemini("gemini-test", "AIza-test", base=fake.url).complete("s", "p")
 
     def test_busy_errors_back_off_then_give_up_as_ordinary_errors(self):

@@ -62,6 +62,9 @@ existing recipes and deployed models are unchanged.
   typed in for Gemini moves setup to Vertex AI, and a Gemini API key typed in for Vertex AI stays on the Gemini API.
   When Google refuses a key because its project has the API turned off or the key's API restrictions leave it out,
   setup says which, with the page that changes it.
+- Gemini labellers get 32,768 output tokens instead of 8,192. Gemini's thinking comes out of the same allowance (about
+  3,000 to 4,000 tokens a labelling call), and now and then it used all 8,192 and cut the answer off, which lost that
+  session's labels as unreadable JSON. A cut-off answer is now reported as one.
 
 ## Orion 0.3.0
 
