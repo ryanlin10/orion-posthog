@@ -84,7 +84,7 @@ test('connect: timing mask by default, key types on request, focus fields, sessi
   const rows = decodeRecords(batch);
   assert.deepEqual(rows.map(r => [r.kind, r.press_id ?? r.field]), [['keydown', 1], ['keyup', 1], ['focusin', 'text']]);
   assert.ok(rows.every(r => !('code' in r) && !('key_type' in r) && !('modifiers' in r)));
-  assert.equal(batch.schema_version, '1.3');
+  assert.equal(batch.schema_version, '1.4');
   orion.stop();
 
   const typed = connect(e.posthog, { window: e.win, allowSynthetic: true, mask: 'types' });

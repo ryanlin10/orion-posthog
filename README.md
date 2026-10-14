@@ -25,8 +25,13 @@ this after your PostHog snippet:
 <script src="https://cdn.paradigmmachines.ai/orion.js" defer></script>
 ```
 
-By default Orion keeps when a key went down and came up, never which key. Password fields and `.ph-no-capture` send
-nothing. Event contents: [docs/data-format.md](docs/data-format.md).
+By default Orion keeps when a key went down and came up, never which key. It also notes when a field is pasted into or
+autofilled (never what), how long the tab was hidden, how far down the page someone scrolled, and the box of the button
+they pressed. Password fields and `.ph-no-capture` send nothing. Event contents: [docs/data-format.md](docs/data-format.md).
+
+Before you train anything, `base: true` runs a small model that ships with Orion: signs of negative feeling from typing
+rhythm and pointer movement, trained on the public DUX dataset. It is weak, and [docs/base-model.md](docs/base-model.md)
+says how weak.
 
 ## Train
 
@@ -34,12 +39,11 @@ nothing. Event contents: [docs/data-format.md](docs/data-format.md).
 pip install "paradigm-orion[sequence] @ git+https://github.com/ryanlin10/orion-posthog"   # Python 3.11+
 orion init      # sign in to PostHog in your browser and add an AI key; each is checked as you go
 orion check     # what works, and what fixes the rest
-orion pull --since 30d --recipe recipes/checkout-sentiment.yaml
-orion train recipes/checkout-sentiment.yaml
-orion deploy checkout-sentiment
+orion train --deploy   # pull, label, build, train, check, and deploy if it beat shuffled labels
 ```
 
-Recipe format: [orion-datasets skill](skills/orion-datasets/SKILL.md).
+Start from [recipes/site-feelings.yaml](recipes/site-feelings.yaml) (the setup agent writes the same file). Every
+setting: [orion-datasets skill](skills/orion-datasets/SKILL.md).
 
 ## Use the labels
 

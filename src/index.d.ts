@@ -1,9 +1,12 @@
-export const SCHEMA_VERSION: '1.3';
+export const SCHEMA_VERSION: '1.4';
 export const EVENT_NAME: 'orion_input';
 export const SESSION_EVENT: 'orion_session_start';
 export const LABEL_EVENT: 'orion_label';
 export const SELF_REPORT_EVENT: 'orion_self_report';
 export const MOOD_MODEL: 'orion:mood';
+/** Load name of the base model that ships inside orion.js (connect's `base: true`). */
+export const BASE: 'orion:base';
+export const BASE_MODEL: OrionModel;
 export const MOODS: ['angry', 'frustrated', 'calm', 'anxious', 'confused', 'pleased'];
 export const POSITIVE: string[];
 export const NEGATIVE: string[];
@@ -37,6 +40,8 @@ export interface RecorderOptions {
   keyboard?: Mask;
   /** Record focus changes with a coarse field kind (default true). */
   focus?: boolean;
+  /** Record that a field changed without typing (paste, drop or autofill), never its value (default true). */
+  fills?: boolean;
   movementSource?: 'auto' | 'pointermove' | 'pointerrawupdate';
   excludeSelector?: string;
   isAllowed?: () => boolean;
@@ -58,6 +63,8 @@ export interface Recorder {
   /** This recorder's id, as in every orion_input event. */
   recorderId: string;
 }
+/** How a field changed without typing: 'paste', 'drop' or 'fill'; null for typing, deleting and undo. */
+export function fillVia(inputType: string | undefined, field: string): 'paste' | 'drop' | 'fill' | null;
 export function createRecorder(posthog: PostHogClient, options?: RecorderOptions & { onRecord?: (row: Record<string, unknown>) => void; onReset?: () => void }): Recorder;
 
 /** A model file written by `orion train` / `orion deploy` (format "orion-model", version 1). */
@@ -67,7 +74,11 @@ export interface OrionModel {
   name: string;
   version: number;
   target: { name: string; type: 'categorical' | 'continuous'; classes?: string[]; min?: number; max?: number; binary?: boolean };
-  window: { size_ms: number; align: 'past' | 'symmetric' | 'future'; min_events?: number; max_events?: number; allow_gaps?: boolean };
+  window: { size_ms: number; align: 'past' | 'symmetric' | 'future'; min_events?: number; max_events?: number; allow_gaps?: boolean; allow_away?: boolean };
+  /** A rare class's own bar: it is the label once its probability reaches min_probability. */
+  decision?: { class: string; min_probability: number };
+  /** baseline: compare windows with this browser's earlier page loads (`features.baseline: true` in the recipe). */
+  features?: { families: string[]; names?: string[]; exclude?: string[]; baseline?: { tile_ms: number; grace_ms: number; cap: number; min_tiles: number } };
   estimator: { kind: 'linear' | 'forest' | 'boosted' | 'onnx'; [key: string]: unknown };
   agents?: string[];
   [key: string]: unknown;
@@ -121,6 +132,8 @@ export interface ConnectOptions extends RecorderOptions {
   models?: Array<string | OrionModel>;
   /** The built-in mood reading (the demo's heuristics). true, or { hold, agents, local }. */
   mood?: boolean | { hold?: number; agents?: string[]; local?: boolean };
+  /** The base model: signs of negative feeling from typing rhythm and pointer movement, trained on DUX. Weak; see docs/base-model.md. */
+  base?: boolean | { agents?: string[] };
   /** Ask people how it is going, for self-report labels. */
   selfReport?: boolean | SelfReportOptions;
   live?: { every?: number; heartbeat?: number; confirm?: number; send?: boolean };

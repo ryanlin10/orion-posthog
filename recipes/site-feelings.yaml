@@ -1,0 +1,16 @@
+# Orion's default recipe: how visitors say it is going, on every page, from their input just before they were asked.
+# skills/orion-setup writes this same recipe into a project; test_recipes.py keeps the two identical.
+name: site-feelings
+source: {since: 30d}            # add pages: [/checkout] to focus on one flow
+target:
+  feeling: [calm, pleased, engaged, confident, frustrated, confused, anxious, angry, bored]
+window: {length: 10s, align: past}
+telemetry: [pointer, keyboard, scroll, fills, visibility, depth, overshoot]
+labels:
+  by: [self_report, human, model]   # model needs the AI key; drop it without one
+  min_confidence: 0.6           # drops unsure AI labels; answers and human labels always count
+  model:
+    reads: [replay]             # add text if the app logs AI prompts as PostHog $ai_generation events
+model: {architecture: logistic} # beats trees until a few hundred labels; then compare --arch boosted_trees
+quality: {min_events: 20}       # a window needs real input, not two stray events
+deploy: {context: [support-agent]}

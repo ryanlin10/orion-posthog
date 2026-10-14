@@ -5,6 +5,8 @@ description: Deploy a trained Orion classifier so it labels live sessions in vis
 
 # Orion deploy
 
+`orion train --deploy` trains and deploys in one go when the model passes its checks (see orion-train). On its own:
+
 ```sh
 orion survey recipes/checkout-sentiment.yaml                     # optional: rank the question's answers with Jev
 orion deploy checkout-sentiment --context support-agent          # into public/orion (--out to change)
@@ -21,7 +23,7 @@ After the PostHog snippet:
 ```html
 <script>window.orionOptions = { mask: 'timing', models: ['/orion/checkout-sentiment.json'],
   selfReport: { survey: '/orion/checkout-sentiment-survey.json' } };</script>
-<script src="https://cdn.paradigmmachines.ai/orion@0.3.0/orion.js" defer></script>
+<script src="https://cdn.paradigmmachines.ai/orion@0.4.0/orion.js" defer></script>
 ```
 
 or with a bundler:
@@ -33,10 +35,15 @@ await o.ready;          // names of the models that loaded
 ```
 
 Sequence models (GRU, TCN, transformer) also need onnxruntime-web on the page first (`window.ort`), or pass
-`ort` to `connect`.
+`ort` to `connect`. A model that reads `corrections` needs `mask: 'types'` (the printed snippet says so, and the
+console warns otherwise). A model with `features.baseline` keeps per-browser averages of its window features in
+`localStorage` under `orion-baseline:<model>`, only while capture is allowed; mention it in the privacy notice.
 
 Without a trained model, `mood: true` runs the built-in mood reading (heuristics on pointer speed, turns and clicks)
-and labels sessions as model `orion-mood`. `selfReport` asks "How is it going so far?" with two positive and two
+and labels sessions as model `orion-mood`, and `base: true` runs the base model that ships with orion.js (model
+`orion-base`: `neutral` or `negative` from typing rhythm and movement shape, trained on the DUX dataset). The base model
+is weak: when it says `negative` it is right about a quarter of the time (docs/base-model.md). Use it to pick replays
+and moments to ask, not to steer an assistant. `selfReport` asks "How is it going so far?" with two positive and two
 negative answers (settings: `trigger`, `afterMs`, `sample`, `cooldownDays`, `pages`, `rank`); `orion.ask()` asks now.
 Answers arrive as `orion_self_report` events and become self-report labels on the next `orion build`.
 

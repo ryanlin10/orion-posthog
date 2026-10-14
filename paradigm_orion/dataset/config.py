@@ -6,11 +6,16 @@ DEFAULT = {
     "version": 1,
     "window": {"mode": "label", "size_ms": 10000, "stride_ms": 10000, "max_events": 100000, "max_duration_ms": 300000, "max_windows_per_label": 10000},
     "labels": {"sources": ["human", "self_report"], "min_confidence": 0.0},
-    "quality": {"min_events": 2, "allow_gaps": False, "allow_synthetic": False, "require_quality_metadata": False},
-    "features": {"families": ["keyboard", "pointer", "scroll"], "exclude": [], "hook": None},
+    # allow_away keeps windows in which the person left the tab or window (gaps named hidden, blur or pagehide).
+    "quality": {"min_events": 2, "allow_gaps": False, "allow_away": False, "allow_synthetic": False, "require_quality_metadata": False},
+    # baseline: None, or {tile_ms, grace_ms, cap, min_tiles} to add <feature>_rel against the person's earlier page loads.
+    "features": {"families": ["keyboard", "pointer", "scroll"], "exclude": [], "hook": None, "baseline": None},
     "split": {"seed": "telemetry-v1", "fractions": {"train": 0.7, "validation": 0.15, "test": 0.15}, "assignments": {}, "allow_subject_overlap": False},
     "output": {"include_sequence": False},
 }
+
+
+FAMILIES = {"keyboard", "pointer", "scroll", "focus", "volume", "fills", "visibility", "depth", "overshoot", "corrections", "typing", "motion", "touch"}
 
 
 def finite(value):
@@ -40,7 +45,7 @@ def recipe_config(value):
             raise ValueError(f"window.{key} must be a positive integer")
     if w["mode"] == "sliding" and w["size_ms"] > w["max_duration_ms"]:
         raise ValueError("Window size exceeds max_duration_ms")
-    allowed_sources = {"human", "self_report", "model", "heuristic", "synthetic"}
+    allowed_sources = {"human", "self_report", "outcome", "model", "heuristic", "synthetic"}
     labels = out["labels"]
     if not isinstance(labels["sources"], list) or not labels["sources"] or any(not isinstance(x, str) for x in labels["sources"]) or set(labels["sources"]) - allowed_sources:
         raise ValueError("Invalid label sources")
@@ -61,14 +66,18 @@ def recipe_config(value):
     q = out["quality"]
     if not isinstance(q["min_events"], int) or isinstance(q["min_events"], bool) or q["min_events"] < 1:
         raise ValueError("min_events must be positive")
-    for key in ("allow_gaps", "allow_synthetic", "require_quality_metadata"):
+    for key in ("allow_gaps", "allow_away", "allow_synthetic", "require_quality_metadata"):
         if not isinstance(q[key], bool):
             raise ValueError(f"quality.{key} must be boolean")
     if not isinstance(out["output"]["include_sequence"], bool):
         raise ValueError("include_sequence must be boolean")
     f = out["features"]
-    if not isinstance(f["families"], list) or any(not isinstance(x, str) for x in f["families"]) or set(f["families"]) - {"keyboard", "pointer", "scroll", "focus", "volume"}:
+    if not isinstance(f["families"], list) or any(not isinstance(x, str) for x in f["families"]) or set(f["families"]) - FAMILIES:
         raise ValueError("Invalid feature families")
+    if f["baseline"] is not None:
+        b = f["baseline"]
+        if not isinstance(b, dict) or set(b) != {"tile_ms", "grace_ms", "cap", "min_tiles"} or any(not isinstance(v, int) or isinstance(v, bool) or v <= 0 for v in b.values()):
+            raise ValueError("features.baseline needs positive integers tile_ms, grace_ms, cap and min_tiles")
     if f["hook"] is not None and not isinstance(f["hook"], str):
         raise ValueError("features.hook must be a local Python file")
     if not isinstance(f["exclude"], list) or any(not isinstance(k, str) for k in f["exclude"]):

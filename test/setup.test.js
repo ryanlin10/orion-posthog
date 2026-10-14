@@ -402,7 +402,7 @@ test('main: a no-questions run with Orion\'s agent edits the app, shows the chan
   const env = { PATH: '', ANTHROPIC_API_KEY: 'test-key', ORION_KEYS_FILE: path.join(dir, 'no-keys.env') };
   const code = await main(['--dir', dir, '--yes', '--agent', 'api'], { ui, env, fetch });
   assert.equal(code, 0, printed);
-  assert.match(requests[0].body.messages[0].content, /orion\.connect\(posthog, \{ mask: 'timing', mood: true \}\)/);
+  assert.match(requests[0].body.messages[0].content, /orion\.connect\(posthog, \{ mask: 'timing', mood: true, base: true \}\)/);
   assert.match(await readFile(path.join(dir, 'src/main.tsx'), 'utf8'), /orion\.connect/);
   assert.match(printed, /◇  Your project\n│  .*\n│  React \(Vite\) · npm\n│  PostHog starts in src\/main\.tsx:6/);
   assert.match(printed, /M src\/main\.tsx  \+2 −0\n│      import App from '\.\/App'\n│    \+ import \{ orion \} from '@paradigmmachines\/orion'/);

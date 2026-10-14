@@ -11,8 +11,8 @@ from pathlib import Path
 ARCHITECTURES = ("logistic", "random_forest", "boosted_trees", "gru", "tcn", "transformer")
 SEQUENCE_ARCHITECTURES = ("gru", "tcn", "transformer")
 ALIASES = {"temporal_cnn": "tcn", "trees": "boosted_trees", "forest": "random_forest"}
-FAMILIES = ("pointer", "keyboard", "scroll", "focus", "volume")
-LABELLERS = ("human", "self_report", "model")
+FAMILIES = ("pointer", "keyboard", "scroll", "focus", "volume", "fills", "visibility", "depth", "overshoot", "corrections", "typing", "motion", "touch")
+LABELLERS = ("human", "self_report", "outcome", "model")
 READERS = ("text", "replay")
 ALIGNS = ("past", "symmetric", "future")
 SPLITS = ("user", "day", "session")
@@ -22,6 +22,8 @@ TOP_LEVEL = {"name", "source", "target", "window", "telemetry", "labels", "split
 POSITIVE = ("calm", "pleased", "engaged", "confident")
 NEGATIVE = ("frustrated", "confused", "anxious", "angry", "bored")
 DEFAULT_QUESTION = "How is it going so far?"
+# Per-person baselines: tiles close a second after they end, means cap at 100 tiles, and need 3 before they count.
+BASELINE = {"grace_ms": 1000, "cap": 100, "min_tiles": 3}
 
 
 class RecipeError(ValueError):
@@ -88,6 +90,40 @@ def parse_self_report(raw, target_name, target):
     return {"question": question, "positive": positive, "negative": negative}
 
 
+def parse_outcome(raw, target):
+    """Goal events that label the windows before them: {class: [event names, or /paths for page views]}."""
+    if not isinstance(raw, dict) or set(raw) - {"events", "otherwise", "within", "skip", "windows"}:
+        raise RecipeError("labels.outcome accepts events, otherwise, within, skip and windows")
+    if target["type"] != "categorical":
+        raise RecipeError("Outcome labels need a target with classes, e.g. outcome: [purchased, left]")
+
+    def as_class(value):
+        # YAML reads yes/no as true/false; a binary target's classes are "yes" and "no".
+        value = ("yes" if value else "no") if isinstance(value, bool) and target.get("binary") else str(value)
+        if value not in target["classes"]:
+            raise RecipeError(f"labels.outcome: {value!r} is not one of the target's classes")
+        return value
+
+    events = raw.get("events")
+    if not isinstance(events, dict) or not events:
+        raise RecipeError("labels.outcome.events maps target classes to goal events, e.g. purchased: [order completed, /checkout/done]")
+    goals = {}
+    for cls, names in events.items():
+        names = [names] if isinstance(names, str) else names
+        if not isinstance(names, list) or not names or any(not isinstance(n, str) or not n.strip() for n in names):
+            raise RecipeError("labels.outcome.events lists PostHog event names, or page paths starting with /")
+        goals[as_class(cls)] = [n.strip() for n in names]
+    otherwise = raw.get("otherwise")
+    otherwise = None if otherwise is None else as_class(otherwise)
+    if otherwise in goals:
+        raise RecipeError("labels.outcome.otherwise must be a class without goal events")
+    windows = raw.get("windows", 6)
+    if not isinstance(windows, int) or isinstance(windows, bool) or not 1 <= windows <= 100:
+        raise RecipeError("labels.outcome.windows must be a whole number from 1 to 100")
+    return {"events": goals, "otherwise": otherwise, "within_ms": duration_ms(raw.get("within", "5m"), "labels.outcome.within"),
+            "skip_ms": duration_ms(raw.get("skip", "5s"), "labels.outcome.skip"), "windows": windows}
+
+
 def load_recipe(path):
     path = Path(path)
     text = path.read_text()
@@ -144,12 +180,14 @@ def compile_recipe(raw):
     if not isinstance(telemetry, list) or not telemetry or set(telemetry) - set(FAMILIES):
         raise RecipeError(f"telemetry must list some of {', '.join(FAMILIES)}")
     features = raw.get("features", {}) or {}
-    if set(features) - {"exclude", "hook"}:
-        raise RecipeError("features accepts exclude and hook")
+    if set(features) - {"exclude", "hook", "baseline"}:
+        raise RecipeError("features accepts exclude, hook and baseline")
+    if not isinstance(features.get("baseline", False), bool):
+        raise RecipeError("features.baseline is true or false")
 
     labels = raw.get("labels", {}) or {}
-    if set(labels) - {"by", "min_confidence", "model", "self_report"}:
-        raise RecipeError("labels accepts by, min_confidence, model and self_report")
+    if set(labels) - {"by", "min_confidence", "model", "self_report", "outcome"}:
+        raise RecipeError("labels accepts by, min_confidence, model, self_report and outcome")
     by = labels.get("by", ["human"])
     if not isinstance(by, list) or not by or set(by) - set(LABELLERS):
         raise RecipeError(f"labels.by must list some of {', '.join(LABELLERS)}")
@@ -168,7 +206,10 @@ def compile_recipe(raw):
     if not isinstance(min_confidence, (int, float)) or not 0 <= min_confidence <= 1:
         raise RecipeError("labels.min_confidence must be between 0 and 1")
     self_report = parse_self_report(labels.get("self_report", {}) or {}, target_name, target_def)
-    labels = {"by": by, "min_confidence": float(min_confidence), "self_report": self_report,
+    if "outcome" in by and not labels.get("outcome"):
+        raise RecipeError("labels.by includes outcome, so labels.outcome must name the goal events")
+    outcome = parse_outcome(labels["outcome"], target_def) if labels.get("outcome") else None
+    labels = {"by": by, "min_confidence": float(min_confidence), "self_report": self_report, "outcome": outcome,
               # No llm: the model chosen at `orion init` (or the first provider with a saved key).
               "model": {"reads": reads, "llm": model_labels.get("llm"), "guide": model_labels.get("guide", ""),
                         "max_sessions": int(model_labels.get("max_sessions", 500)),
@@ -196,6 +237,8 @@ def compile_recipe(raw):
         raise RecipeError(f"model.architecture must be one of {', '.join(ARCHITECTURES)}")
     params = {k: v for k, v in model.items() if k not in ("architecture", "input")}
     model = {"architecture": architecture, "input": "sequence" if architecture in SEQUENCE_ARCHITECTURES else "window_features", "params": params}
+    if features.get("baseline") and model["input"] == "sequence":
+        raise RecipeError("features.baseline works with logistic, random_forest and boosted_trees models")
 
     deploy = raw.get("deploy", {}) or {}
     if set(deploy) - {"live", "context", "every", "heartbeat", "confirm"}:
@@ -211,11 +254,14 @@ def compile_recipe(raw):
     if set(quality) - {"drop_gaps", "drop_synthetic", "min_events"}:
         raise RecipeError("quality accepts drop_gaps, drop_synthetic and min_events")
     quality = {"drop_gaps": bool(quality.get("drop_gaps", True)), "drop_synthetic": bool(quality.get("drop_synthetic", True)),
-               "min_events": int(quality.get("min_events", 2))}
+               "min_events": int(quality.get("min_events", 2)),
+               # With visibility, leaving the tab is a feature, so windows with time away are kept.
+               "keep_away": "visibility" in telemetry}
 
     return {"name": name, "source": source, "target": {"name": target_name, **target_def},
             "window": {"length_ms": length, "stride_ms": stride, "align": align}, "telemetry": telemetry,
-            "features": {"exclude": list(features.get("exclude", [])), "hook": features.get("hook")},
+            "features": {"exclude": list(features.get("exclude", [])), "hook": features.get("hook"),
+                         "baseline": {"tile_ms": length, **BASELINE} if features.get("baseline") else None},
             "labels": labels, "split": split, "model": model, "deploy": deploy, "quality": quality}
 
 
@@ -230,9 +276,10 @@ def builder_recipe(recipe, assignments=None):
         # One extra millisecond absorbs floating-point rounding in window bounds computed from wall-clock times.
         "window": {"mode": "label", "max_duration_ms": recipe["window"]["length_ms"] + 1},
         "labels": {"sources": recipe["labels"]["by"], "min_confidence": recipe["labels"]["min_confidence"]},
-        "quality": {"allow_gaps": not recipe["quality"]["drop_gaps"], "allow_synthetic": not recipe["quality"]["drop_synthetic"],
-                    "min_events": recipe["quality"]["min_events"]},
-        "features": {"families": recipe["telemetry"], "exclude": recipe["features"]["exclude"], "hook": recipe["features"]["hook"]},
+        "quality": {"allow_gaps": not recipe["quality"]["drop_gaps"], "allow_away": recipe["quality"].get("keep_away", False),
+                    "allow_synthetic": not recipe["quality"]["drop_synthetic"], "min_events": recipe["quality"]["min_events"]},
+        "features": {"families": recipe["telemetry"], "exclude": recipe["features"]["exclude"], "hook": recipe["features"]["hook"],
+                     "baseline": recipe["features"].get("baseline")},
         "split": {"seed": recipe["split"]["seed"], "fractions": recipe["split"]["fractions"],
                   "assignments": assignments or {}, "allow_subject_overlap": within_person},
         "output": {"include_sequence": recipe["model"]["input"] == "sequence"},

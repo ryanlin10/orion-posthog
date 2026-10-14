@@ -1,0 +1,13 @@
+Orion
+Copyright (c) 2026 Ryan Lin. Licensed under the MIT License (see LICENSE).
+
+src/base-model.js holds a model trained on the DUX dataset:
+
+  Bieber, C., Leppich, D., Harms, P. and Schubert, U. (2023). DUX: A dataset of User Interactions and User Emotions.
+  Zenodo. https://doi.org/10.5281/zenodo.7778612
+  Licensed under the Creative Commons Attribution 4.0 International License (CC BY 4.0),
+  https://creativecommons.org/licenses/by/4.0/
+
+The model's weights were derived from that data (scripts/base_model.py). test/fixtures/base-model-windows.json holds
+eight 10-second windows from DUX, converted to Orion records (key identities removed). No other part of the dataset is
+redistributed. Changes: events were converted to Orion's input records and summarised into window features.

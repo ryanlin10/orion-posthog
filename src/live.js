@@ -5,9 +5,12 @@ import { createNormalizer, extractFeatures } from './features.js';
 import { predict, predictSteps, evidence, validateModel } from './model.js';
 import { encodeSteps, CHANNELS } from './sequence.js';
 import { MOOD_SPEC, createMood, moodEvidence } from './mood.js';
+import { INPUTLESS, windowRows, createBaseline } from './baseline.js';
+import { BASE_MODEL } from './base-model.js';
 
 export const LABEL_EVENT = 'orion_label';
 export const MOOD_MODEL = 'orion:mood';
+export const BASE = 'orion:base';
 
 export function createLive({ win, posthog, permitted, every = 2000, heartbeat = 60000, confirm = 2, history = 8, send = true, fetchJson, fetchBytes, ort }) {
   if (!Number.isInteger(every) || every < 250) throw new RangeError('Invalid live interval');
@@ -18,13 +21,15 @@ export function createLive({ win, posthog, permitted, every = 2000, heartbeat = 
   let rows = [], gaps = [], ordinal = 0, previousEnd = null, horizon = 0, timer, moodTimer, stopped = false, lastInput = -Infinity;
 
   function record(row) {
-    if (row.kind !== 'boundary') lastInput = Math.max(lastInput, row.t);
+    const input = !INPUTLESS.has(row.kind);
+    if (input) lastInput = Math.max(lastInput, row.t);
     for (const m of models.values()) m.mood?.record(row);
     const clean = normalize(row);
     clean.ordinal = ordinal++;
-    if (row.kind === 'boundary') gaps.push([Math.min(previousEnd ?? row.t, row.t), row.t]);
+    if (row.kind === 'boundary') gaps.push([Math.min(previousEnd ?? row.t, row.t), row.t, row.reason]);
     previousEnd = Math.max(previousEnd ?? row.t, row.t);
     rows.push(clean);
+    if (input) for (const m of models.values()) m.baseline?.advance(rows, gaps, row.t, m.spec.window);
   }
   function reset() {
     normalize = createNormalizer();
@@ -36,19 +41,16 @@ export function createLive({ win, posthog, permitted, every = 2000, heartbeat = 
     }
   }
   function prune(now) {
-    const cutoff = now - horizon - 1000;
+    // Rows of baseline tiles that have not closed yet stay until they do.
+    const cutoff = Math.min(now - horizon - 1000, ...[...models.values()].map(m => m.baseline?.keepFrom() ?? Infinity));
     if (rows.length && rows[0].t < cutoff) rows = rows.filter(r => r.t >= cutoff);
     if (gaps.length && gaps[0][1] < cutoff) gaps = gaps.filter(g => g[1] >= cutoff);
   }
 
   function windowFor(m, now) {
-    const { size_ms: size, min_events: minEvents = 2, max_events: maxEvents = 100000, allow_gaps: allowGaps = false } = m.spec.window;
-    const a = now - size, b = now;
-    const inside = rows.filter(r => r.t >= a && r.t < b).sort((p, q) => p.t - q.t || p.ordinal - q.ordinal);
-    if (inside.length > maxEvents) return { reason: 'too-many-events' };
-    if (inside.filter(r => r.kind !== 'boundary').length < minEvents) return { reason: 'too-few-events' };
-    if (!allowGaps && gaps.some(([start, end]) => start < b && end >= a)) return { reason: 'capture-gap' };
-    return { events: inside, context: { start_ms: a, end_ms: b } };
+    const a = now - m.spec.window.size_ms, b = now;
+    const w = windowRows(rows, gaps, a, b, m.spec.window);
+    return w.events ? { events: w.events, context: { start_ms: a, end_ms: b } } : w;
   }
 
   function sessionId() { try { return posthog.get_session_id?.() ?? null; } catch { return null; } }
@@ -115,6 +117,7 @@ export function createLive({ win, posthog, permitted, every = 2000, heartbeat = 
     const w = windowFor(m, now);
     if (!w.events) { stats.noRead++; m.noRead = w.reason; return; }
     const { features } = extractFeatures(w.events, w.context, m.spec.features.families);
+    if (m.baseline) Object.assign(features, m.baseline.relative(features));
     let result;
     if (m.session) {
       const e = m.spec.estimator;
@@ -175,23 +178,28 @@ export function createLive({ win, posthog, permitted, every = 2000, heartbeat = 
 
   async function load(source, options = {}) {
     if (source === MOOD_MODEL) return loadMood(options);
-    const spec = validateModel(typeof source === 'string' ? await fetchJson(source) : source);
+    // The base model ships inside orion.js; a site's own models come from URLs or objects.
+    const spec = validateModel(source === BASE ? { ...BASE_MODEL, agents: options.agents ?? [] } : typeof source === 'string' ? await fetchJson(source) : source);
     const session = spec.estimator.kind === 'onnx' ? await sessionFor(spec, source, options) : null;
     if (spec.window.align && spec.window.align !== 'past') {
       // Live input only has the past; a model trained on centred windows is scored on the most recent one.
       console.warn(`[orion] ${spec.name} was trained on ${spec.window.align} windows; live scoring uses the most recent ${spec.window.size_ms} ms`);
     }
-    models.set(spec.name, { spec, session, ort: options.ort ?? ort, busy: false, label: undefined, since: 0, earlier: [], evidence: [], pending: null, streak: 0, lastSent: 0, updated: 0, noRead: null });
+    // Per-person baselines live in this browser's storage, written only while capture is permitted.
+    let storage;
+    try { storage = win.localStorage; } catch { /* blocked, e.g. in a sandboxed frame */ }
+    const baseline = spec.features?.baseline && !session ? createBaseline(spec, storage) : null;
+    models.set(spec.name, { spec, session, baseline, ort: options.ort ?? ort, busy: false, label: undefined, since: 0, earlier: [], evidence: [], pending: null, streak: 0, lastSent: 0, updated: 0, noRead: null });
     horizon = Math.max(...[...models.values()].filter(m => !m.mood).map(m => m.spec.window.size_ms));
     if (timer === undefined && !stopped) timer = win.setInterval(tick, every);
     return spec.name;
   }
 
-  // Without a name: the first trained model with a label, then the built-in mood reading.
+  // Without a name: the site's own trained model with a label, then the base model, then the built-in mood reading.
   function pick(name) {
     if (name !== undefined) { const m = models.get(name); return m?.local ? undefined : m; }
     const ready = [...models.values()].filter(m => m.label !== undefined && !m.local);
-    return ready.find(m => !m.mood) ?? ready[0];
+    return ready.find(m => !m.mood && m.spec.name !== BASE_MODEL.name) ?? ready.find(m => !m.mood) ?? ready[0];
   }
 
   return {
@@ -210,6 +218,7 @@ export function createLive({ win, posthog, permitted, every = 2000, heartbeat = 
       return lines.join('\n');
     },
     labels() { return [...models.values()].filter(m => !m.local).map(snapshot).filter(Boolean); },
+    families: name => models.get(name)?.spec.features?.families,
     /** The built-in mood reading right now (also when it only runs locally for the self-report question). */
     mood() {
       const m = models.get(MOOD_SPEC.name);

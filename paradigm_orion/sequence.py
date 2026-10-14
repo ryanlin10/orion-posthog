@@ -21,7 +21,7 @@ CHANNEL_FAMILY = {"moves": "pointer", "path": "pointer", "peak_speed": "pointer"
                   "wheel": "scroll", "focus_changes": "focus", "gap": None, "active": None}
 KIND_FAMILY = {"pointermove": "pointer", "pointerdown": "pointer", "pointerup": "pointer", "pointercancel": "pointer", "click": "pointer",
                "dblclick": "pointer", "contextmenu": "pointer", "keydown": "keyboard", "keyup": "keyboard", "wheel": "scroll",
-               "scroll": "scroll", "focusin": "focus", "focusout": "focus"}
+               "scroll": "scroll", "focusin": "focus", "focusout": "focus", "input": "fills", "visible": "visibility"}
 
 
 def channels_for(families):
@@ -354,7 +354,7 @@ def train_sequence(workspace, recipe, dataset_dir, evaluate_test, log, shuffles=
     spec = {**FORMAT, "name": recipe["name"], "version": version,
             "target": {k: target[k] for k in ("name", "type", "classes", "min", "max", "binary") if k in target},
             "window": {"size_ms": recipe["window"]["length_ms"], "align": recipe["window"]["align"], "min_events": recipe["quality"]["min_events"],
-                       "max_events": 100000, "allow_gaps": not recipe["quality"]["drop_gaps"]},
+                       "max_events": 100000, "allow_gaps": not recipe["quality"]["drop_gaps"], "allow_away": recipe["quality"].get("keep_away", False)},
             "features": {"families": recipe["telemetry"], "exclude": recipe["features"]["exclude"], "names": names},
             "estimator": {"kind": "onnx", "file": onnx_name, "input": "steps", "output": "out", "steps": steps, "step_ms": step_ms,
                           "channels": channels, "link": link, "classes": [str(c) for c in model.classes_] if model.classes_ is not None else None},

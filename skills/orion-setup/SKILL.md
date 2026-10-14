@@ -5,8 +5,9 @@ description: Set up Orion end to end in a web app that uses PostHog - the browse
 
 # Orion setup
 
-Orion runs on top of the app's existing PostHog. It adds fine-grained input telemetry (key timing, pointer, scroll),
-a live mood reading, an optional in-page question, and sentiment classifiers whose labels feed AI assistants.
+Orion runs on top of the app's existing PostHog. It adds fine-grained input telemetry (key timing, pointer, scroll,
+pastes and autofills without their text, time away from the tab, scroll depth, the box of each pressed control), a
+live mood reading, an optional in-page question, and classifiers whose labels feed AI assistants.
 Nothing is hosted by Orion: training runs on this machine, live labelling in visitors' browsers.
 
 Work in two phases. Phase 1 is done today. Phase 2 needs a week or two of real data.
@@ -24,7 +25,8 @@ Work in two phases. Phase 1 is done today. Phase 2 needs a week or two of real d
 - **Never capture key identities.** Keep `mask: 'timing'`: Orion then records when keys go down and up, never which
   key or what is typed. Password fields are silent automatically. Do not mark ordinary forms, checkouts or chat boxes
   private: what people type there is never recorded, and how they type there is the signal. Use `data-private` only
-  where even typing rhythm is sensitive, such as a PIN pad.
+  where even typing rhythm is sensitive, such as a PIN pad. The correction rate (deletes per key press) needs
+  `mask: 'types'`, which adds key classes such as letter or delete; switch only if the person asks for it.
 - Add `.orion/` to `.gitignore`: it holds pulled telemetry and labels. If the site is deployed by uploading the
   project folder itself (`wrangler pages deploy .`, `netlify deploy --dir .`, an S3 sync of `.`), `.orion/`, recipes
   and skills would be published with it: deploy only the site's own files (move them into `public/` if need be).
@@ -38,6 +40,8 @@ Find and report back:
   snippet. **Orion needs PostHog.** If there is none, stop and say so (PostHog's wizard: `npx -y @posthog/wizard`).
 - how consent is handled (a banner, `opt_in_capturing`, a cookie flag), if at all;
 - the AI assistant, if any: where the page sends a user's message, and where the server builds the prompt;
+- goal events the app already sends to PostHog (`posthog.capture('purchase')`, sign-up, cancel) or confirmation
+  pages: later, Orion can learn what sessions go on to do from them (phase 2). Just list them; add none;
 - the static files folder (`public/`, `static/`) and any Content Security Policy.
 
 ### 2. Add Orion to the browser
@@ -47,8 +51,8 @@ most once every 14 days per browser, and its answers become the best training la
 
 **HTML snippet sites:** right after the PostHog snippet:
 ```html
-<script>window.orionOptions = { mask: 'timing', mood: true, selfReport: true };</script>
-<script src="https://cdn.paradigmmachines.ai/orion@0.3.0/orion.js" defer></script>
+<script>window.orionOptions = { mask: 'timing', mood: true, base: true, selfReport: true };</script>
+<script src="https://cdn.paradigmmachines.ai/orion@0.4.0/orion.js" defer></script>
 ```
 
 **Bundled apps (posthog-js from npm):** `npm i github:ryanlin10/orion-posthog` (it installs as
@@ -56,7 +60,7 @@ most once every 14 days per browser, and its answers become the best training la
 ```js
 import { orion } from '@paradigmmachines/orion';
 if (typeof window !== 'undefined' && !window.orion) {
-  window.orion = orion.connect(posthog, { mask: 'timing', mood: true, selfReport: true });
+  window.orion = orion.connect(posthog, { mask: 'timing', mood: true, base: true, selfReport: true });
 }
 ```
 In React or Next.js put it next to the PostHog init (a client component or `useEffect`), never in server code.
@@ -111,11 +115,14 @@ source: {since: 30d}            # add pages: [/checkout] to focus on one flow
 target:
   feeling: [calm, pleased, engaged, confident, frustrated, confused, anxious, angry, bored]
 window: {length: 10s, align: past}
-telemetry: [pointer, keyboard, scroll]
+telemetry: [pointer, keyboard, scroll, fills, visibility, depth, overshoot]
 labels:
-  by: [self_report, model]      # model needs the AI key; use [self_report, human] without one
+  by: [self_report, human, model]   # model needs the AI key; drop it without one
+  min_confidence: 0.6           # drops unsure AI labels; answers and human labels always count
   model:
     reads: [replay]             # add text if the app logs AI prompts as PostHog $ai_generation events
+model: {architecture: logistic} # beats trees until a few hundred labels; then compare --arch boosted_trees
+quality: {min_events: 20}       # a window needs real input, not two stray events
 deploy: {context: [support-agent]}
 ```
 The orion-datasets skill documents every setting.
@@ -137,14 +144,20 @@ come back: phase 2, after about two weeks or a few hundred answered questions.
 
 ## Phase 2: once data has arrived
 
-1. `orion pull --since 30d --recipe recipes/site-feelings.yaml`, then `orion status`.
-2. `orion train recipes/site-feelings.yaml`, and read the report with the orion-train skill. Do not deploy a model
-   whose shuffled-label check fails. With fewer than a few hundred labelled windows, also try
-   `--arch logistic` and keep the better validation score.
-3. `orion deploy site-feelings --context support-agent` (writes to `public/orion`), and add the printed model URL to
-   `models: [...]` in the Orion options. Re-run `orion survey … --out public/orion` too.
+1. `orion train --deploy --json`: one command pulls the new data, labels it, builds, trains, checks, and writes the
+   model to `public/orion` only if it passed (read the result with the orion-train skill). The first time, add the
+   printed model URL to `models: [...]` in the Orion options; later runs replace the file in place. Once there are a
+   few hundred labelled windows, also try `--arch boosted_trees` and keep the better validation score.
+2. Re-run `orion survey recipes/site-feelings.yaml --out public/orion` so the question knows the real pages.
+3. Deploy the site as usual so the new files go live.
 4. Give the assistant the labels (orion-context skill): the page sends `window.orion?.context()` with each message,
    and the server checks it (known model and label, confidence a number) before writing its own line into the
    system prompt. Never paste text from the page into a prompt. Server-side, `orion context <session id>` reads the
    label from PostHog instead (about a minute behind).
 5. To investigate where people struggle, use the orion-research skill (`orion search --label frustrated`).
+6. Optional, when the app tracks goals (step 1): an outcome recipe whose labels come from those events, e.g.
+   `recipes/checkout-outcome.yaml` with `target: {outcome: [purchased, left]}` and `labels: {by: [outcome], outcome:
+   {events: {purchased: [<the app's event>]}, otherwise: left}}` (orion-datasets documents it). Its labels say what a
+   session went on to do, not how anyone felt.
+7. Optional, when many people come back: `features: {baseline: true}` in the recipe compares each window with the
+   same browser's earlier visits; orion.js keeps those averages in the visitor's browser (localStorage).

@@ -1,6 +1,6 @@
 {
   "name": "@paradigmmachines/orion",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Fine-grained input telemetry on top of PostHog, with live sentiment labels for your agents",
   "type": "module",
   "license": "MIT",
@@ -27,9 +27,9 @@
     "bin",
     "setup",
     "LICENSE",
+    "NOTICE",
     "README.md",
     "docs",
-    "recipes",
     "skills"
   ],
   "scripts": {

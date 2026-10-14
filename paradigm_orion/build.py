@@ -23,6 +23,11 @@ def group_of(recording, split_by):
     return f"{person}|{recording['day']}"
 
 
+def browser_of(recording):
+    """The browser a page load ran in: PostHog's device id, which lives as long as the browser's stored baseline."""
+    return str(recording.get("device_id") or recording.get("distinct_id") or recording.get("person_id") or recording["recorder_id"])
+
+
 def day_assignments(days, fractions):
     """Earlier days train, later days validate, the latest days test."""
     days = sorted(set(days))
@@ -44,6 +49,11 @@ def run_labellers(store, recipe, llm=None, relabel=False, log=print):
         labels, stats["self_report"] = label_self_report(store, recipe)
         save_labels(store.ws, recipe, "self_report", labels)
         log(f"  self-report labels: {stats['self_report']}")
+    if "outcome" in recipe["labels"]["by"]:
+        from .labellers.outcome import label_outcome
+        labels, stats["outcome"] = label_outcome(store, recipe)
+        save_labels(store.ws, recipe, "outcome", labels)
+        log(f"  outcome labels: {stats['outcome']}")
     if "model" not in recipe["labels"]["by"]:
         return stats
     for reader in recipe["labels"]["model"]["reads"]:
@@ -71,7 +81,7 @@ def build(store, recipe, llm=None, relabel=False, log=print):
     label_stats = run_labellers(store, recipe, llm, relabel, log)
     all_labels = load_all(ws, recipe)
     by = recipe["labels"]["by"]
-    wanted = {"self_report": "self_report" in by, "human": "human" in by, "text": "model" in by, "replay": "model" in by}
+    wanted = {"self_report": "self_report" in by, "human": "human" in by, "outcome": "outcome" in by, "text": "model" in by, "replay": "model" in by}
     merged, overlaps = merge([labels for name, labels in all_labels.items() if wanted[name]])
     pages = tuple(recipe["source"]["pages"])
     cutoff = time.time() * 1000 - recipe["source"]["since_days"] * 86400000
@@ -82,18 +92,22 @@ def build(store, recipe, llm=None, relabel=False, log=print):
     merged = [l for l in merged if l["recorder_id"] in recordings and in_scope(recordings[l["recorder_id"]])]
     if not merged:
         raise ValueError("No labels fall on pulled telemetry in scope; check the recipe's source settings or label more windows")
-    used = {l["recorder_id"] for l in merged}
+    labelled = used = {l["recorder_id"] for l in merged}
+    if recipe["features"].get("baseline"):
+        # Baselines come from each browser's earlier page loads, labelled or not.
+        browsers = {browser_of(recordings[rid]) for rid in used}
+        used = labelled | {rid for rid, r in recordings.items() if browser_of(r) in browsers}
     split_by = recipe["split"]["by"]
     rows = []
     for rid in sorted(used):
         r = recordings[rid]
-        row = {"recorder_id": rid, "group_id": group_of(r, split_by)}
+        row = {"recorder_id": rid, "group_id": group_of(r, split_by), "baseline_key": browser_of(r)}
         if split_by == ["user"]:
             row["subject_id"] = str(r.get("person_id") or r.get("distinct_id") or rid)
             if r.get("session_id"):
                 row["session_id"] = r["session_id"]
         rows.append(row)
-    assignments = day_assignments([row["group_id"] for row in rows], recipe["split"]["fractions"]) if split_by == ["day"] else {}
+    assignments = day_assignments([row["group_id"] for row in rows if row["recorder_id"] in labelled], recipe["split"]["fractions"]) if split_by == ["day"] else {}
     config = builder_recipe(recipe, assignments)
     if config["features"]["hook"]:
         config["features"]["hook"] = str((Path(recipe["path"]).parent / config["features"]["hook"]).resolve())
