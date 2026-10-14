@@ -90,11 +90,11 @@ def save(values):
             lines[i] = f"{name}={values[name]}"
     written = {parse_line(line)[0] for line in lines}
     lines += [f"{name}={value}" for name, value in values.items() if name not in written]
-    _write_private(path, "\n".join(lines) + "\n")
+    write_private(path, "\n".join(lines) + "\n")
     return path
 
 
-def _write_private(path, text):
+def write_private(path, text):
     fd, tmp = tempfile.mkstemp(prefix=".keys-", dir=path.parent)  # Created with mode 0600.
     try:
         with os.fdopen(fd, "w") as f:

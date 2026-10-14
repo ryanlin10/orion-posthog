@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { chmod, cp, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -11,11 +13,11 @@ import { claudeEvent, codexEvent, onPath, runCodingAgent } from '../setup/coding
 import { createWorkspace, diffLines, restore, snapshot, ToolError } from '../setup/files.js';
 import { findKey, readKeys, saveKeys } from '../setup/keys.js';
 import { main } from '../setup/main.js';
+import { accessToken, authFile, loginFor, SCOPES as SIGN_IN_SCOPES, signIn } from '../setup/posthog-auth.js';
 import { detect, installCommand, posthogPlaces, vendorDir } from '../setup/project.js';
 import { createClient, providerFor } from '../setup/providers.js';
 import { createUI } from '../setup/ui.js';
 import { findProject, orionEvents, waitForEvents } from '../setup/verify.js';
-import { signIn } from '../setup/posthog-auth.js';
 import { localUrl, serveFolder, startDevServer } from '../setup/run-app.js';
 
 const APPS = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'apps');
@@ -331,21 +333,6 @@ test('verify: finds the project by its public key across regions, then counts Or
   await assert.rejects(findProject({ key: 'phx', fetch: async () => json({}, 403) }), /query:read/);
 });
 
-test('verify: project-scoped OAuth reads approved projects without enumerating the organization', async () => {
-  const calls = [];
-  const fetch = async url => {
-    calls.push(url);
-    if (url.endsWith('/api/projects/')) return json({}, 403);
-    return json({ id: 7, name: 'Approved project', api_token: 'public-token' });
-  };
-  const place = await findProject({ key: 'oauth-token', token: 'public-token', region: 'us', projectIds: [7], fetch });
-  assert.equal(place.project.id, 7);
-  assert.deepEqual(calls, ['https://us.posthog.com/api/projects/7/']);
-  const empty = await findProject({ key: 'oauth-token', region: 'us', projectIds: [], fetch });
-  assert.deepEqual(empty.projects, []);
-  assert.equal(calls.length, 1, 'an empty OAuth grant must not fall back to listing all projects');
-});
-
 test('providers: exhausted daily quota fails promptly with a readable fallback, transient rate limits retry', async () => {
   let requests = 0;
   const client = createClient({ provider: 'gemini', model: 'gemini-3.8-flash', key: 'secret-test-key', system: '', prompt: '', tools: [],
@@ -374,6 +361,65 @@ test('tool discovery: respects PATH precedence and finds native user installs wh
   assert.equal(await onPath('uv', { HOME: home, PATH: '/nonexistent' }), path.join(local, 'uv'));
   assert.equal(await onPath('uv', { HOME: home, PATH: preferred }), path.join(preferred, 'uv'));
   assert.equal(await onPath('missing', { HOME: home, PATH: preferred }), null);
+});
+
+test('posthog sign-in: PKCE in the browser, one project, a private file the training tools read, rotating refresh tokens', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'orion-auth-'));
+  const env = { ORION_KEYS_FILE: path.join(dir, 'keys.env') };
+  const codes = new Map();
+  let authorize = null, issued = 0, refresh = null;
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://posthog.test');
+    if (url.pathname === '/oauth/authorize/') {  // The person clicks Authorize at once.
+      authorize = Object.fromEntries(url.searchParams);
+      const code = `code-${codes.size}`;
+      codes.set(code, authorize);
+      res.writeHead(302, { location: `${authorize.redirect_uri}?code=${code}&state=${encodeURIComponent(authorize.state)}` }).end();
+      return;
+    }
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const form = Object.fromEntries(new URLSearchParams(body));
+    if (form.grant_type === 'authorization_code') {
+      const asked = codes.get(form.code);
+      if (!asked || asked.code_challenge !== createHash('sha256').update(form.code_verifier).digest('base64url') || asked.redirect_uri !== form.redirect_uri) {
+        res.writeHead(400).end('{"error":"invalid_grant"}');
+        return;
+      }
+    } else if (form.refresh_token !== refresh) {
+      res.writeHead(400).end('{"error":"invalid_grant"}');
+      return;
+    }
+    issued += 1;
+    refresh = `phr_${issued}`;
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+      access_token: `pha_${issued}`, refresh_token: refresh, expires_in: 3600, scope: SIGN_IN_SCOPES.join(' '), scoped_teams: [9] }));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const host = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const record = await signIn(host, { openUrl: url => { fetch(url).then(r => r.text()); }, env });
+    assert.equal(record.project, '9');
+    assert.equal(authorize.required_access_level, 'project');
+    assert.equal(authorize.code_challenge_method, 'S256');
+    assert.equal(authorize.scope, 'project:read query:read batch_export:read batch_export:write');
+    assert.match(authorize.redirect_uri, /^http:\/\/127\.0\.0\.1:\d+\/callback$/);
+    const file = authFile(env);
+    assert.equal(file, path.join(dir, 'posthog-auth.json'));
+    assert.equal((await stat(file)).mode & 0o777, 0o600);
+    const saved = JSON.parse(await readFile(file, 'utf8'));
+    assert.deepEqual(Object.keys(saved.logins), [`${host} 9`]);  // the layout paradigm_orion/posthog_auth.py reads
+    assert.equal(await accessToken(host, '9', { env }), 'pha_1');
+    saved.logins[`${host} 9`].expires_at = Math.floor(Date.now() / 1000) + 10;
+    await writeFile(file, JSON.stringify(saved));
+    assert.equal(await accessToken(host, '9', { env }), 'pha_2');
+    assert.equal((await loginFor(host, null, env)).refresh_token, 'phr_2');
+    refresh = 'phr_revoked';
+    await assert.rejects(accessToken(host, '9', { env, rejected: 'pha_2' }), /sign-in has ended/);
+  } finally {
+    server.close();
+    await rm(dir, { recursive: true });
+  }
 });
 
 test('main: a no-questions run with Orion\'s agent edits the app, shows the change, and keeps it', async () => {
@@ -469,54 +515,24 @@ test('main: refuses to run in the home folder', async () => {
   assert.doesNotMatch(printed, /Your project/, 'stops before reading anything');
 });
 
-// A fake PostHog OAuth server: registration, token and revoke; `approve` plays the developer in the browser.
-function fakeOAuth() {
-  const calls = [];
-  const fetch = async (url, init) => {
-    const body = init.headers['content-type'] === 'application/json' ? JSON.parse(init.body) : Object.fromEntries(new URLSearchParams(String(init.body)));
-    calls.push({ url, body });
-    if (url.endsWith('/oauth/register/')) return json({ client_id: 'orion-client' }, 201);
-    if (url.endsWith('/oauth/token/')) return body.code === 'good' ? json({ access_token: 'pha_token', posthog_region: 'eu', scoped_teams: [7] }) : json({ error: 'invalid_grant' }, 400);
-    if (url.endsWith('/oauth/revoke/')) return json({});
-    return json({}, 404);
-  };
-  return { calls, fetch };
-}
-
-async function approve(local, params) {
-  const authorize = new URL((await globalThis.fetch(local, { redirect: 'manual' })).headers.get('location'));
-  const back = new URL(authorize.searchParams.get('redirect_uri'));
-  back.search = new URLSearchParams({ state: authorize.searchParams.get('state'), ...params });
-  const page = await (await globalThis.fetch(back)).text();
-  return { authorize, page };
-}
-
-test('sign-in: registers a client, opens a short local link, and trades the approval for a read-only token', async () => {
-  const { calls, fetch } = fakeOAuth();
-  let browser;
-  const session = await signIn({ fetch, open: url => { browser = approve(url, { code: 'good' }); } });
-  const seen = await browser;
-  assert.equal(session.key, 'pha_token');
-  assert.equal(session.region, 'eu');
-  assert.deepEqual(session.projectIds, [7]);
-  assert.equal(seen.authorize.origin + seen.authorize.pathname, 'https://oauth.posthog.com/oauth/authorize/');
-  assert.equal(seen.authorize.searchParams.get('scope'), 'project:read query:read');
-  assert.equal(seen.authorize.searchParams.get('code_challenge_method'), 'S256');
-  assert.match(seen.page, /PostHog approval received/);
-  assert.deepEqual(calls[0].body.redirect_uris, [seen.authorize.searchParams.get('redirect_uri')]);
-  assert.match(calls[0].body.redirect_uris[0], /^http:\/\/127\.0\.0\.1:\d+\/callback$/);
-  const token = calls.find(c => c.url.endsWith('/oauth/token/')).body;
-  assert.equal(token.client_id, 'orion-client');
-  assert.ok(token.code_verifier.length >= 43);
-  await session.revoke();
-  assert.equal(calls.at(-1).body.token, 'pha_token');
-});
-
-test('sign-in: a refusal in the browser is an error, and Enter in the terminal ends it quietly', async () => {
-  const { fetch } = fakeOAuth();
-  await assert.rejects(signIn({ fetch, open: url => { approve(url, { error: 'access_denied' }); } }), /not approved \(access_denied\)/);
+test('posthog sign-in: a short local link leads to PostHog, a refusal is an error, Enter in the terminal ends it quietly', async () => {
+  const env = { ORION_KEYS_FILE: path.join(os.tmpdir(), 'orion-auth-unused', 'keys.env') };
+  let link, opened;
+  const refused = signIn('https://posthog.test', { env, onLink: l => { link = l; }, openUrl: url => {
+    opened = (async () => {
+      const hop = await globalThis.fetch(link, { redirect: 'manual' });
+      const authorize = new URL(url);
+      const back = new URL(authorize.searchParams.get('redirect_uri'));
+      back.search = new URLSearchParams({ state: authorize.searchParams.get('state'), error: 'access_denied' });
+      await globalThis.fetch(back).catch(() => {});
+      return hop.headers.get('location');
+    })();
+  } });
+  await assert.rejects(refused, /sign-in was cancelled/);
+  assert.match(link, /^http:\/\/127\.0\.0\.1:\d+\/$/);
+  assert.match(await opened, /^https:\/\/posthog\.test\/oauth\/authorize\/\?/);
   const stop = new AbortController();
-  assert.equal(await signIn({ fetch, signal: stop.signal, open: () => stop.abort() }), null);
+  assert.equal(await signIn('https://posthog.test', { env, signal: stop.signal, openUrl: () => stop.abort() }), null);
 });
 
 test('run-app: finds the address a dev server prints, stops it, and serves plain-HTML sites', async () => {

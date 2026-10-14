@@ -77,6 +77,7 @@ class Orion:
             r = self.recipe(recipe)
             if "text" in r["labels"]["model"]["reads"] and not r["labels"]["model"]["text"].get("file"):
                 text_events = (r["labels"]["model"]["text"]["event"],)
+        self.posthog.require_pull_access()  # Before any export exists: a missing scope stops here, with the fix.
         return self.store.pull(self.posthog, days(since, "since"), events, text_events, log=self.log)
 
     def build(self, recipe, relabel=False):

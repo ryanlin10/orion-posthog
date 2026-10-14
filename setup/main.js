@@ -14,11 +14,11 @@ import { CODING_AGENTS, findCodingAgents, onPath, runCodingAgent, stopCodingAgen
 import { createWorkspace, diffLines, restore, snapshot } from './files.js';
 import { findKey, keysFile, saveKeys } from './keys.js';
 import { detect, installCommand, LOCKFILES, PACKAGE, vendorDir } from './project.js';
-import { signIn } from './posthog-auth.js';
 import { checkKey, DEFAULT_MODELS, KEY_NAMES, NAMES, PROVIDERS, providerFor } from './providers.js';
 import { serveFolder, startDevServer } from './run-app.js';
 import { Cancelled, createUI } from './ui.js';
-import { findProject, HOSTS, SCOPES, waitForEvents } from './verify.js';
+import { accessToken, authFile, loginFor, saveLogin, signIn } from './posthog-auth.js';
+import { findProject, HOSTS, projectInfo, SCOPES, waitForEvents } from './verify.js';
 
 const REPO = 'ryanlin10/orion-posthog';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -452,57 +452,37 @@ function stopOnExit(stop) {
 
 async function verify(ui, project, env, fetch) {
   const { c } = ui;
-  let found = await findKey(POSTHOG_KEY, env);
-  let session = null, place = null, app = null;
+  const host = HOSTS[project.posthog.region ?? 'us'];
+  // A sign-in from an earlier run (or `orion init`) first, then a saved key, else ask: signing in is the default.
+  let watch = await fromSignIn(ui, project, host, env, fetch);
+  if (!watch) {
+    const found = await findKey(POSTHOG_KEY, env);
+    if (found) watch = await fromKey(ui, project, found, env, fetch);
+  }
+  // A cancelled sign-in or a refused key comes back here to choose again.
+  while (!watch) {
+    const how = await ui.select({ message: 'Watch for Orion\'s first events in PostHog?', initial: 'signin', options: [
+      { value: 'signin', label: 'Sign in with PostHog', hint: 'opens your browser; nothing to paste, and the training tools use it too' },
+      { value: 'paste', label: 'Paste a personal API key', hint: `needs ${SCOPES}` },
+      { value: 'skip', label: 'Skip the check' }] });
+    if (how === 'skip') return;
+    if (how === 'signin') watch = await signInNow(ui, project, host, env, fetch);
+    else {
+      openUrl(`${host}/settings/user-api-keys`);
+      const value = await ui.text({ message: 'PostHog personal API key', secret: true, placeholder: 'phx_…' });
+      if (value) watch = await fromKey(ui, project, { value, from: 'typed' }, env, fetch);
+    }
+  }
+  const app = await openApp(ui, project, env);
   try {
-    while (!place) {
-      if (!found) {
-        const how = await ui.select({ message: 'Watch for Orion\'s first events in PostHog?', initial: 'signin', options: [
-          { value: 'signin', label: 'Sign in to PostHog in the browser', hint: 'read-only, for this check only; nothing is saved' },
-          { value: 'paste', label: 'Paste a personal API key', hint: `with the ${SCOPES} scopes` },
-          { value: 'skip', label: 'Skip the check' }] });
-        if (how === 'skip') return;
-        if (how === 'signin') {
-          await session?.revoke();
-          session = await browserSignIn(ui, fetch, project.posthog.region);
-          if (!session) continue;
-          found = { value: session.key, from: 'signin', region: session.region ?? project.posthog.region, projectIds: session.projectIds };
-        } else {
-          const value = await ui.text({ message: 'PostHog personal API key', secret: true, placeholder: 'phx_…' });
-          if (!value) continue;
-          found = { value, from: 'typed' };
-        }
-      }
-      try {
-        place = await findProject({ key: found.value, token: project.posthog.token, region: found.region ?? project.posthog.region,
-          projectIds: found.projectIds, fetch });
-      } catch (error) {
-        ui.warn(`Cannot check events: ${error.message}.`, ['typed', 'signin'].includes(found.from) ? [] : [`That key came from ${tilde(found.from)}.`]);
-        if (!error.status) return;  // PostHog unreachable: asking again will not help
-        found = null;
-      }
-    }
-    if (found.from === 'typed') {
-      ui.note(c.dim('Orion\'s training tools (orion pull) can use this key too if it also has the batch_export:read and batch_export:write scopes.'));
-      if (await ui.confirm({ message: `Keep the key for Orion's training tools in ${tilde(keysFile(env))}?`, yes: 'Keep it', no: 'Just this run' })) {
-        await saveKeys({ [POSTHOG_KEY]: found.value }, env);
-      }
-    }
-    let chosen = place.project;
-    if (!chosen) {
-      if (!place.projects.length) { ui.warn('The key sees no PostHog projects.'); return; }
-      const id = await ui.select({ message: 'Which PostHog project does this app send to?', options: place.projects.map(p => ({ value: p.id, label: p.name, hint: `id ${p.id}` })) });
-      chosen = place.projects.find(p => p.id === id);
-    }
-    app = await openApp(ui, project, env);
     const spin = ui.spinner();
-    spin.start(`Waiting for Orion's first events in ${chosen.name}  ${c.dim('Enter skips')}`);
+    spin.start(`Waiting for Orion's first events in ${watch.name}  ${c.dim('Enter skips')}`);
     const skip = ui.skippable();
     let events = null;
     const since = Date.now();
     let explainedWait = false;
     try {
-      events = await waitForEvents({ host: place.host, key: found.value, projectId: chosen.id, since,
+      events = await waitForEvents({ host: watch.host, key: watch.key, projectId: watch.projectId, since,
         siteHost: app?.url ? new URL(app.url).host : undefined, signal: skip.signal, fetch,
         onCheck: ({ count }) => {
           if (!count && !explainedWait && Date.now() - since >= 60_000) {
@@ -518,36 +498,13 @@ async function verify(ui, project, env, fetch) {
     }
     if (events) {
       spin.stop(`Orion is live: ${events.count} event${events.count > 1 ? 's' : ''}${events.browser ? ` from ${events.browser}` : ''}${events.host ? ` on ${events.host}` : ''}`);
-      ui.note(c.dim(`${place.host}/project/${chosen.id}/activity/explore`));
+      ui.note(c.dim(`${watch.host}/project/${watch.projectId}/activity/explore`));
     } else {
       spin.stop(skip.signal.aborted ? 'Skipped. Orion\'s events show up in PostHog as orion_input once the app runs'
         : 'No Orion events arrived. Check that PostHog loads in your browser, then run the check again.', skip.signal.aborted);
     }
   } finally {
     app?.stop();
-    await session?.revoke();
-  }
-}
-
-/**
- * PostHog's sign-in page in the browser; null when the developer cancels or it fails (they choose again). With the
- * app's region known it goes straight to that region's sign-in, which saves a "US or EU?" page.
- */
-async function browserSignIn(ui, fetch, region) {
-  const { c } = ui;
-  const spin = ui.spinner();
-  spin.start(`Waiting for you to approve Orion in PostHog  ${c.dim('Enter cancels')}`);
-  const skip = ui.skippable();
-  try {
-    const session = await signIn({ open: openUrl, fetch, signal: skip.signal, ...(HOSTS[region] && { base: HOSTS[region] }),
-      onUrl: url => spin.log(`If no browser opened, go to ${url}`) });
-    spin.stop(session ? 'Signed in to PostHog' : 'Sign-in cancelled', Boolean(session));
-    return session;
-  } catch (error) {
-    spin.stop(error.message, false);
-    return null;
-  } finally {
-    skip.done();
   }
 }
 
@@ -601,4 +558,79 @@ async function openApp(ui, project, env) {
   ui.note(c.dim('Opened it in the browser. Move the cursor around in the page.'));
   openUrl(app.url);
   return { stop: done, url: app.url };
+}
+
+/** What to watch with an earlier browser sign-in for this PostHog cloud, or null. */
+async function fromSignIn(ui, project, host, env, fetch) {
+  const record = await loginFor(host, null, env);
+  if (!record) return null;
+  try {
+    return await describe(ui, project, host, await accessToken(host, record.project, { fetch, env }), record.project, fetch);
+  } catch (error) {
+    ui.warn(`The saved PostHog sign-in did not work (${error.message}).`);
+    return null;
+  }
+}
+
+/** Signs in through the browser: PostHog's own page asks which project, and the training tools reuse the sign-in. */
+async function signInNow(ui, project, host, env, fetch) {
+  const { c } = ui;
+  ui.step('Signing in to PostHog', [`Your browser opens PostHog: sign in, choose the project this app sends to, and click ${c.bold('Authorize')}.`]);
+  const spin = ui.spinner();
+  spin.start(`Waiting for PostHog  ${c.dim('Enter cancels')}`);
+  const skip = ui.skippable();
+  let record;
+  try {
+    record = await signIn(host, { openUrl, fetch, env, signal: skip.signal, onLink: link => spin.log(`If no browser opened, go to ${link}`) });
+    spin.stop(record ? `Signed in to PostHog; saved in ${tilde(authFile(env))} for the training tools` : 'Sign-in cancelled', Boolean(record));
+  } catch (error) {
+    spin.stop(error.message, false);
+    return null;
+  } finally {
+    skip.done();
+  }
+  if (!record) return null;
+  if (!record.project) {  // PostHog left the choice to Orion.
+    let projects;
+    try {
+      projects = (await findProject({ key: record.access_token, token: project.posthog.token, region: project.posthog.region, fetch })).projects;
+    } catch (error) {
+      ui.warn(`Cannot list your PostHog projects: ${error.message}.`);
+      return null;
+    }
+    const id = await ui.select({ message: 'Which PostHog project does this app send to?', options: projects.map(p => ({ value: p.id, label: p.name, hint: `id ${p.id}` })) });
+    record = await saveLogin(record, env, id);
+  }
+  return describe(ui, project, host, record.access_token, record.project, fetch);
+}
+
+/** The existing personal API key route: the cloud and project are found by the app's public key. */
+async function fromKey(ui, project, found, env, fetch) {
+  let place;
+  try {
+    place = await findProject({ key: found.value, token: project.posthog.token, region: project.posthog.region, fetch });
+  } catch (error) {
+    ui.warn(`Cannot check events: ${error.message}.`);
+    return null;
+  }
+  if (found.from === 'typed' && await ui.confirm({ message: `Keep the key for Orion's training tools in ${tilde(keysFile(env))}?`, yes: 'Keep it', no: 'Just this run' })) {
+    await saveKeys({ [POSTHOG_KEY]: found.value }, env);
+  }
+  let chosen = place.project;
+  if (!chosen) {
+    if (!place.projects.length) { ui.warn('The key sees no PostHog projects.'); return null; }
+    const id = await ui.select({ message: 'Which PostHog project does this app send to?', options: place.projects.map(p => ({ value: p.id, label: p.name, hint: `id ${p.id}` })) });
+    chosen = place.projects.find(p => p.id === id);
+  }
+  return { host: place.host, key: found.value, projectId: chosen.id, name: chosen.name };
+}
+
+/** The project a sign-in reads, with a warning when the app's code sends its events to a different one. */
+async function describe(ui, project, host, key, projectId, fetch) {
+  const info = await projectInfo({ host, key, projectId, fetch });
+  if (project.posthog.token && info.api_token && info.api_token !== project.posthog.token) {
+    ui.warn(`You chose ${info.name} in PostHog, but this app sends its events to another project.`,
+      ['Orion\'s events will arrive there. Sign in again (`orion init`) and choose that project to read them.']);
+  }
+  return { host, key, projectId, name: info.name ?? `project ${projectId}` };
 }

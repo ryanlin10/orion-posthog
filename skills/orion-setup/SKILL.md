@@ -14,8 +14,9 @@ Work in two phases. Phase 1 is done today. Phase 2 needs a week or two of real d
 ## Ground rules
 
 - **Keys never go through you.** Do not ask for API keys in chat and never write keys into files, `.env` files or
-  commits. When keys are needed, ask the person to run `orion init` in their own terminal window (it needs a real
-  terminal to take keys hidden; run through an agent's shell it skips the questions).
+  commits. Run `orion init` yourself, from the app's folder: in your shell (no terminal) it opens a setup page on
+  127.0.0.1 in the person's browser, where they sign in to PostHog with one click and paste the AI key. Each key is
+  checked live there and saved to a file only they can read; you only see what worked.
 - **Ask before visible or legal choices:** whether visitors may see the question, and how consent works. Do
   everything else yourself, with the defaults below; do not ask what Orion should detect (step 5).
 - **Consent.** Input timing can identify a person, so treat it as personal data. If the app has a consent banner or
@@ -24,7 +25,9 @@ Work in two phases. Phase 1 is done today. Phase 2 needs a week or two of real d
   key or what is typed. Password fields are silent automatically. Do not mark ordinary forms, checkouts or chat boxes
   private: what people type there is never recorded, and how they type there is the signal. Use `data-private` only
   where even typing rhythm is sensitive, such as a PIN pad.
-- Add `.orion/` to `.gitignore`: it holds pulled telemetry and labels.
+- Add `.orion/` to `.gitignore`: it holds pulled telemetry and labels. If the site is deployed by uploading the
+  project folder itself (`wrangler pages deploy .`, `netlify deploy --dir .`, an S3 sync of `.`), `.orion/`, recipes
+  and skills would be published with it: deploy only the site's own files (move them into `public/` if need be).
 
 ## Phase 1: today
 
@@ -81,15 +84,17 @@ Python 3.11 or newer:
 ```sh
 pipx install "paradigm-orion @ git+https://github.com/ryanlin10/orion-posthog"   # or: uv tool install "…same…"
 ```
-Add `[sequence]` after `paradigm-orion` only for GRU, TCN or transformer models (it pulls in PyTorch). Then save the
-non-secret settings yourself and ask the person to add the keys in their own terminal:
-```sh
-orion init --no-input --host https://us.posthog.com --project <PostHog project id>   # eu.posthog.com for EU
-```
-Tell the person, in these words: "Please run `orion init` in a terminal window. It asks for a PostHog personal API key
-(scopes query:read, project:read, batch_export:read, batch_export:write), an AI key (Anthropic, OpenAI or Gemini) for
-labelling, and optionally a TypeSafe key, which ranks the question's answers. Keys are saved to
-~/.config/orion/keys.env, readable only by you."
+Add `[sequence]` after `paradigm-orion` only for GRU, TCN or transformer models (it pulls in PyTorch).
+
+Then, from the app's folder (Orion refuses the home folder), run `orion init` and tell the person, in these words:
+"Orion's setup page has opened in your browser. Sign in to PostHog and choose this app's project, add an AI key
+(Anthropic, OpenAI or Gemini) for labelling, and optionally a TypeSafe key, then press Finish. The keys stay on your
+computer." It waits up to 20 minutes for Finish; if your shell stops commands sooner, run it in the background and
+wait for it to exit. Pass `--host https://eu.posthog.com` for PostHog's EU cloud when the app's code does not show it.
+If no browser can open (a remote machine), ask the person to run `orion init` in a terminal on their own computer.
+
+Then run `orion check`. Every line should be ✓, or - for an optional part. A ✗ line names its fix; usually that is
+running `orion init` again. Do not go on to pulling data until PostHog shows ✓.
 
 ### 5. Write the first recipe
 
@@ -126,7 +131,8 @@ it knows the real pages.
 
 ### 7. Hand over
 
-Summarise: what changed (files), what the person must do (`orion init`, deploy the site, privacy notice), and when to
+Summarise: what changed (files), what the person must do (deploy the site, a privacy notice; `orion init` only if
+`orion check` still shows ✗), and when to
 come back: phase 2, after about two weeks or a few hundred answered questions.
 
 ## Phase 2: once data has arrived

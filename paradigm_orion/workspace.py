@@ -9,9 +9,31 @@ from pathlib import Path
 CONFIG_KEYS = {"posthog_host", "posthog_project", "posthog_ui_host", "llm_model"}
 
 
+def find_root(start=None):
+    """The nearest .orion/ in this folder or a folder above it (the way git finds .git), else this folder's.
+    The home folder and the top of the disk never count: they hold many projects, not one."""
+    here = Path(start or Path.cwd()).resolve()
+    stops = {Path.home().resolve(), Path(here.anchor)}
+    for folder in (here, *here.parents):
+        if folder in stops:
+            break
+        if (folder / ".orion").is_dir():
+            return folder / ".orion"
+    return here / ".orion"
+
+
 class Workspace:
     def __init__(self, root=None):
-        self.root = Path(root or os.environ.get("ORION_HOME") or Path.cwd() / ".orion").resolve()
+        self.root = Path(root or os.environ.get("ORION_HOME") or find_root()).resolve()
+
+    def misplaced(self):
+        """Why this is not a project's folder, or None. Orion keeps one .orion/ per app, beside its code."""
+        folder = self.root.parent
+        if os.environ.get("ORION_HOME") or folder not in (Path.home().resolve(), Path(folder.anchor)):
+            return None
+        where = "your home folder" if folder == Path.home().resolve() else "the top of the disk"
+        return (f"{folder} is {where}, not an app's folder. Go to your app's folder (cd my-app) and run this there: "
+                "Orion keeps its data in .orion/ beside the app, and your keys and PostHog sign-in are shared by all of them.")
 
     def path(self, *parts):
         return self.root.joinpath(*parts)

@@ -6,6 +6,7 @@ PostHog asks third-party tools not to use /query for exports, so `pull` uses fil
 import gzip
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -14,12 +15,21 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 US_HOST = "https://us.posthog.com"
+KEY_NAME = "POSTHOG_PERSONAL_API_KEY"
 EXPORT_DONE = "Completed"
 EXPORT_FAILED = {"Failed", "FailedBilling", "Cancelled"}
 
 
 class PostHogError(RuntimeError):
     pass
+
+
+class PostHogAccessError(PostHogError):
+    """Not signed in, a key PostHog refuses, or a key without a scope Orion needs: `orion init` fixes all three."""
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -36,37 +46,111 @@ def ui_host_for(api_host):
 
 class PostHog:
     def __init__(self, host=None, project_id=None, api_key=None, ui_host=None, sleep=time.sleep, poll_seconds=5):
+        from .credentials import env_name, get as stored_key
         self.host = (host or os.environ.get("POSTHOG_HOST") or US_HOST).rstrip("/")
         self.project_id = str(project_id or os.environ.get("POSTHOG_PROJECT_ID") or "")
-        from .credentials import get as stored_key  # The environment first, then the keys file.
-        self.api_key = api_key or stored_key("POSTHOG_PERSONAL_API_KEY")
+        # A key passed in or set in the environment wins; a key from the keys file comes after a browser sign-in.
+        self.api_key = api_key or stored_key(KEY_NAME)
+        self.key_given = bool(api_key or env_name(KEY_NAME))
         self.ui_host = (ui_host or ui_host_for(self.host)).rstrip("/")
         self.sleep, self.poll_seconds = sleep, poll_seconds
         self._plain = urllib.request.build_opener()
         self._no_redirect = urllib.request.build_opener(_NoRedirect)
 
+    def credential(self, rejected=None):
+        """(bearer token, "key" or "sign-in"); (None, None) when there is neither."""
+        from . import posthog_auth
+        if self.api_key and self.key_given:
+            return self.api_key, "key"
+        record = posthog_auth.login(self.host, self.project_id or None)
+        if record:
+            return posthog_auth.access_token(self.host, record["project"], rejected), "sign-in"
+        return (self.api_key, "key") if self.api_key else (None, None)
+
     def request(self, method, path, body=None, attempts=5):
-        if not self.api_key:
-            raise PostHogError("No PostHog personal API key: run `orion init` (or set POSTHOG_PERSONAL_API_KEY)")
+        from .posthog_auth import SignInError
         if not self.project_id and path.startswith("/api/projects/") and path != "/api/projects/":
             raise PostHogError("No PostHog project: run `orion init` (or set POSTHOG_PROJECT_ID)")
+        try:
+            token, kind = self.credential()
+        except SignInError as error:
+            raise PostHogAccessError(str(error)) from None
+        if not token:
+            raise PostHogAccessError("Not signed in to PostHog: run `orion init`, which opens PostHog in your browser "
+                                     f"(or set {KEY_NAME})")
         url = f"{self.host}{path}"
         data = json.dumps(body).encode() if body is not None else None
-        for attempt in range(attempts):
+        refreshed = False
+        attempt = 0
+        while True:
             req = urllib.request.Request(url, data=data, method=method, headers={
-                "Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json", "Accept": "application/json"})
+                "Authorization": f"Bearer {token}", "Content-Type": "application/json", "Accept": "application/json"})
             try:
                 with self._plain.open(req, timeout=120) as response:
                     payload = response.read()
                     return json.loads(payload) if payload else {}
             except urllib.error.HTTPError as error:
                 detail = error.read().decode(errors="replace")[:500]
+                if error.code == 401 and kind == "sign-in" and not refreshed:  # Expired early or revoked: refresh once.
+                    refreshed = True
+                    try:
+                        token, kind = self.credential(rejected=token)
+                    except SignInError as problem:
+                        raise PostHogAccessError(str(problem)) from None
+                    continue
                 if error.code in (429, 502, 503, 504) and attempt < attempts - 1:
                     retry = error.headers.get("Retry-After")
                     self.sleep(float(retry) if retry and retry.replace(".", "", 1).isdigit() else min(60, 2 ** attempt * 2))
+                    attempt += 1
                     continue
+                if error.code in (401, 403):
+                    raise PostHogAccessError(self.explain(error.code, detail, kind), error.code) from None
                 raise PostHogError(f"PostHog {method} {path} failed with HTTP {error.code}: {detail}") from None
-        raise PostHogError(f"PostHog {method} {path} kept failing")
+
+    def explain(self, status, detail, kind):
+        """What a 401 or 403 means for this credential, and the one step that fixes it."""
+        scope = re.search(r"required scope '([^']+)'", detail)
+        if kind == "sign-in":
+            what = f"Orion's PostHog sign-in lacks the {scope.group(1)} scope" if scope else "PostHog refused Orion's sign-in"
+            return f"{what} (HTTP {status}). Run `orion init` to sign in again."
+        fix = ("Run `orion init` and sign in with PostHog in your browser instead: Orion then gets exactly the access "
+               f"it needs, with nothing to paste. Or edit the key at {self.ui_host}/settings/user-api-keys")
+        if scope:
+            return f"Your PostHog personal API key is missing the {scope.group(1)} scope (HTTP {status}). {fix} and add {scope.group(1)}."
+        if status == 401:
+            return f"PostHog did not accept the personal API key at {self.host} (HTTP {status}). {fix}."
+        return f"PostHog refused the personal API key (HTTP {status}: {detail[:200]}). {fix}."
+
+    def access(self):
+        """What this client can reach, for checks before a pull: {"via", "project", "missing", "problem"}.
+        A personal API key describes its own scopes (/api/personal_api_keys/@current/); a sign-in's scopes are saved."""
+        from . import posthog_auth
+        token, kind = self.credential()
+        report = {"via": kind, "project": None, "missing": [], "problem": None}
+        if kind == "sign-in":
+            record = posthog_auth.login(self.host, self.project_id or None)
+            report["missing"] = posthog_auth.missing_scopes((record.get("scope") or "").split())
+        elif kind == "key":
+            key = self.request("GET", "/api/personal_api_keys/@current/")
+            report["missing"] = posthog_auth.missing_scopes(key.get("scopes") or [])
+            teams = [str(t) for t in key.get("scoped_teams") or []]
+            if teams and self.project_id and self.project_id not in teams:
+                report["problem"] = f"the key is limited to other projects than {self.project_id}"
+        if self.project_id and "project:read" not in report["missing"] and not report["problem"]:
+            report["project"] = self.request("GET", self.project_path(""))
+        return report
+
+    def require_pull_access(self):
+        """Raises PostHogAccessError, with the fix, unless a pull can run: before any export is created."""
+        report = self.access()
+        if report["missing"] or report["problem"]:
+            why = report["problem"] or f"it lacks the {', '.join(report['missing'])} scope{'s' if len(report['missing']) > 1 else ''}"
+            if report["via"] == "sign-in":
+                raise PostHogAccessError(f"Orion's PostHog sign-in cannot pull: {why}. Run `orion init` to sign in again.")
+            raise PostHogAccessError(f"Your PostHog personal API key cannot pull: {why}. Run `orion init` and sign in with "
+                                     "PostHog in your browser instead (Orion then gets exactly the access it needs), or "
+                                     f"edit the key at {self.ui_host}/settings/user-api-keys.")
+        return report
 
     def project_path(self, suffix):
         return f"/api/projects/{urllib.parse.quote(self.project_id)}/{suffix}"
@@ -116,7 +200,7 @@ class PostHog:
         return paths
 
     def _download(self, path, destination):
-        req = urllib.request.Request(f"{self.host}{path}", headers={"Authorization": f"Bearer {self.api_key}"})
+        req = urllib.request.Request(f"{self.host}{path}", headers={"Authorization": f"Bearer {self.credential()[0]}"})
         try:
             with self._no_redirect.open(req, timeout=120) as response:
                 body = response.read()  # Some deployments serve the file directly.

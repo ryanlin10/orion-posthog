@@ -11,7 +11,18 @@ def cmd_init(args):
     init(args)
 
 
+def cmd_check(args):
+    from .checks import print_checks, run_checks
+    rows = run_checks()
+    if args.json:
+        print(json.dumps({"ok": all(r["ok"] is not False for r in rows), "checks": rows}, indent=2))
+    else:
+        print_checks(rows)
+    return 0 if all(r["ok"] is not False for r in rows) else 1
+
+
 def cmd_pull(args):
+    from .posthog import PostHogAccessError
     o = Orion()
     if args.file:
         from datetime import datetime
@@ -19,7 +30,19 @@ def cmd_pull(args):
         o.store.index()
         print(f"Imported {counts[0]} telemetry and {counts[1]} other events")
         return
-    result = o.pull(args.since, args.events or (), args.recipe)
+    try:
+        result = o.pull(args.since, args.events or (), args.recipe)
+    except PostHogAccessError as error:
+        # In a terminal, fix it here: sign in with the browser and carry on, instead of stopping with an error.
+        if not sys.stdin.isatty():
+            raise
+        print(f"orion: {error}")
+        if input("Sign in to PostHog in your browser now and carry on (Enter), or stop (s)? ").strip().lower().startswith("s"):
+            return 1
+        from .onboarding import sign_in_here
+        if not sign_in_here(o.workspace, o.posthog.host, o.posthog.project_id or None):
+            return 1
+        result = Orion().pull(args.since, args.events or (), args.recipe)
     print(f"Pulled {result['telemetry_events']} telemetry and {result['context_events']} other events; {result['recordings']} recordings in total")
 
 
@@ -121,14 +144,21 @@ def main(argv=None):
     p.add_argument("--version", action="version", version=f"orion {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
-    s = sub.add_parser("init", help="Set up this folder: PostHog host, key and project, the AI labeller and its key")
+    s = sub.add_parser("init", help="Set up this folder: sign in to PostHog and choose the project, the AI labeller and its key")
     s.add_argument("--host", help="PostHog app host, e.g. https://us.posthog.com or https://eu.posthog.com")
     s.add_argument("--project", help="PostHog project id")
     s.add_argument("--ui-host", help="Host for replay links if it differs from --host")
     s.add_argument("--llm", help="AI labeller: a provider (anthropic, openai, gemini) or a model, e.g. gpt-5.6-sol")
     s.add_argument("--no-input", action="store_true", help="Ask nothing; save the flags as given")
     s.add_argument("--no-check", action="store_true", help="Do not check the keys with PostHog or the AI provider")
+    how = s.add_mutually_exclusive_group()
+    how.add_argument("--terminal", action="store_true", help="Ask in this terminal (the default when there is one)")
+    how.add_argument("--browser", action="store_true", help="Use the setup page in the browser (the default without a terminal)")
     s.set_defaults(fn=cmd_init)
+
+    s = sub.add_parser("check", help="Check this folder, the PostHog sign-in or key, the AI key and the TypeSafe key, live")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_check)
 
     s = sub.add_parser("pull", help="Export Orion telemetry and the events around it from PostHog")
     s.add_argument("--since", default="30d")
@@ -196,12 +226,20 @@ def main(argv=None):
 
     args = p.parse_args(argv)
     try:
-        args.fn(args)
+        if args.command in WRITES:
+            from .workspace import Workspace
+            problem = Workspace().misplaced()
+            if problem:
+                raise ValueError(problem)
+        code = args.fn(args)
     except (ValueError, FileNotFoundError, RuntimeError) as error:
         sys.stdout.flush()
         print(f"orion: {error}", file=sys.stderr)
         return 1
-    return 0
+    return code if isinstance(code, int) else 0
+
+
+WRITES = {"pull", "label", "build", "train", "deploy", "survey"}  # Commands that write to .orion/ (init checks itself).
 
 
 if __name__ == "__main__":

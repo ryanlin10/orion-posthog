@@ -13,8 +13,8 @@ from urllib.parse import urlparse
 
 from fakes import ScriptedModel
 from paradigm_orion import credentials
-from paradigm_orion.llm import (NAMES, TYPESAFE_CHECK, Anthropic, Cached, Gemini, LLMError, LLMSetupError, OpenAI, make_client,
-                                provider_for, split_model, verify, verify_typesafe)
+from paradigm_orion.llm import (BILLING_PAGES, KEY_PAGES, NAMES, TYPESAFE_CHECK, Anthropic, Cached, Gemini, LLMError, LLMSetupError,
+                                OpenAI, make_client, provider_for, split_model, verify, verify_typesafe)
 from paradigm_orion.workspace import Workspace
 
 
@@ -179,21 +179,47 @@ class ProviderTests(unittest.TestCase):
             self.assertEqual(Gemini("gemini-test", "k").base, "http://gemini.local")
         self.assertEqual(Anthropic("claude-test", "k").base, "https://api.anthropic.com")
 
-    def test_verify_lists_models_with_each_providers_header(self):
-        checks = {"anthropic": ("/v1/models", "x-api-key", lambda k: k),
-                  "openai": ("/v1/models", "authorization", lambda k: f"Bearer {k}"),
-                  "gemini": ("/v1beta/models", "x-goog-api-key", lambda k: k)}
-        for provider, (path, header, value) in checks.items():
-            fake = self.serve({("GET", path): [keyed(header, "good-key", value=value)]})
-            self.assertEqual(verify(provider, "good-key", base=fake.url), (True, f"{NAMES[provider]} accepted the key"))
-            ok, message = verify(provider, "wrong-key-xyz", base=fake.url)
+    def test_verify_asks_the_chosen_model_for_one_tiny_answer_with_each_providers_header(self):
+        checks = {"anthropic": ("claude-x", "/v1/messages", "x-api-key", lambda k: k, lambda b: b["max_tokens"], 1),
+                  "openai": ("gpt-x", "/v1/responses", "authorization", lambda k: f"Bearer {k}", lambda b: b["max_output_tokens"], 16),
+                  "gemini": ("gemini-x", "/v1beta/models/gemini-x:generateContent", "x-goog-api-key", lambda k: k,
+                             lambda b: b["generationConfig"]["maxOutputTokens"], 64)}
+        for provider, (model, path, header, value, budget, tokens) in checks.items():
+            fake = self.serve({("POST", path): [keyed(header, "good-key", {"anything": "goes"}, value=value)]})
+            self.assertEqual(verify(provider, "good-key", model, base=fake.url), (True, f"{NAMES[provider]} accepted the key and {model} answered"))
+            self.assertEqual(budget(fake.requests[0]["body"]), tokens)
+            ok, message = verify(provider, "wrong-key-xyz", model, base=fake.url, sleep=self.sleeps.append)
             self.assertFalse(ok)
-            self.assertIn("did not accept the key", message)
-            self.assertIn("HTTP 401", message)
+            self.assertEqual(message, f"{NAMES[provider]} did not accept the key (401). Create one at {KEY_PAGES[provider]}")
             self.assertNotIn("wrong-key-xyz", message)
             if provider == "anthropic":
                 self.assertEqual(fake.requests[0]["headers"]["anthropic-version"], "2023-06-01")
-        self.assertEqual(verify("openai", ""), (False, "No OpenAI key given"))
+        self.assertEqual(verify("openai", ""), (False, f"No OpenAI key given. Create one at {KEY_PAGES['openai']}"))
+
+    def test_verify_says_in_words_what_is_wrong_and_where_to_fix_it(self):
+        cases = [("anthropic", "/v1/messages", (400, {"error": {"message": "Your credit balance is too low to access the Anthropic API."}}),
+                  f"Anthropic accepted the key, but its account cannot pay for requests. Add credit at {BILLING_PAGES['anthropic']}"),
+                 ("openai", "/v1/responses", (429, {"error": {"code": "insufficient_quota", "message": "You exceeded your current quota"}}),
+                  f"OpenAI accepted the key, but its account cannot pay for requests. Add credit at {BILLING_PAGES['openai']}"),
+                 ("gemini", "/v1beta/models/gemini-x:generateContent", (400, {"error": {"message": "API key not valid. Please pass a valid API key."}}),
+                  f"Gemini did not accept the key (400). Create one at {KEY_PAGES['gemini']}"),
+                 ("anthropic", "/v1/messages", (404, {"error": {"message": "model: claude-x"}}),
+                  "Anthropic accepted the key, but the model claude-x is not available to it. Choose claude-sonnet-5-5 or another model the key can use")]
+        for provider, path, answer, expected in cases:
+            fake = self.serve({("POST", path): [answer]})
+            model = {"anthropic": "claude-x", "openai": "gpt-x", "gemini": "gemini-x"}[provider]
+            self.assertEqual(verify(provider, "k-123456789012", model, base=fake.url, sleep=self.sleeps.append), (False, expected))
+        # Gemini's free tier runs out after a few requests a day; the part that says so comes late in the reply.
+        long = "You exceeded your current quota, please check your plan and billing details. " + "x" * 400 + \
+            " Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests"
+        fake = self.serve({("POST", "/v1beta/models/gemini-x:generateContent"): [(429, {"error": {"code": 429, "message": long}})]})
+        self.assertEqual(verify("gemini", "k-123456789012", "gemini-x", base=fake.url, sleep=self.sleeps.append),
+                         (False, "The key is on Gemini's free tier, whose few requests a day for gemini-x are used up. Labelling "
+                                 f"needs many more: turn on billing for the key's Google Cloud project at {BILLING_PAGES['gemini']}"))
+        # A busy provider says nothing about the key: not checked (None), rather than failed.
+        fake = self.serve({("POST", "/v1beta/models/gemini-x:generateContent"): [(503, {"error": {"message": "This model is currently experiencing high demand."}})]})
+        self.assertEqual(verify("gemini", "k-123456789012", "gemini-x", base=fake.url, sleep=self.sleeps.append),
+                         (None, "Gemini is busy right now (HTTP 503), so the key could not be checked; try again in a minute"))
 
     def test_verify_typesafe_asks_jev_one_question(self):
         fake = self.serve({("POST", "/v1/systemone"): [keyed("authorization", "ts-good", {"answers": {"ok": True}}, value=lambda k: f"Bearer {k}")]})

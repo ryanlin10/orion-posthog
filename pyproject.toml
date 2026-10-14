@@ -23,4 +23,4 @@ orion-dataset = "paradigm_orion.dataset.__main__:main"
 include = ["paradigm_orion*"]
 
 [tool.setuptools.package-data]
-paradigm_orion = ["labellers/*.html"]
+paradigm_orion = ["labellers/*.html", "setup.html"]

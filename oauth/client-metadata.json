@@ -1,0 +1,11 @@
+{
+  "client_id": "https://cdn.paradigmmachines.ai/orion/oauth/client-metadata.json",
+  "client_name": "Orion",
+  "redirect_uris": ["http://127.0.0.1/callback"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "none",
+  "com.posthog": {
+    "scopes": ["project:read", "query:read", "batch_export:read", "batch_export:write"]
+  }
+}

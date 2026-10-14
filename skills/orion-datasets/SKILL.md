@@ -9,13 +9,17 @@ description: Write and run Orion recipes that turn PostHog input telemetry into 
 
 ```sh
 pip install "paradigm-orion[sequence] @ git+https://github.com/ryanlin10/orion-posthog"   # Python 3.11+
-orion init     # asks for the PostHog key and project, the AI labeller (Anthropic, OpenAI or Gemini) and its key,
-               # and a TypeSafe key (Jev ranks the self-report answers); keys go to ~/.config/orion/keys.env
+orion init     # sign in to PostHog in the browser (the project is chosen there), the AI labeller and its key,
+               # and an optional TypeSafe key (Jev ranks the self-report answers); each is checked live
+orion check    # what works, and what fixes the rest
 ```
 
-`orion init` needs a terminal; an agent can run `orion init --no-input --host <host> --project <id> --llm <provider or
-model>` and leave keys to environment variables (POSTHOG_PERSONAL_API_KEY with query:read, project:read,
-batch_export:read and batch_export:write; ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY; TYPESAFE_API_KEY).
+Run them in the app's folder: Orion keeps `.orion/` beside the app and finds it from subfolders, and refuses the home
+folder. In a terminal `orion init` asks there; from an agent's shell it opens a setup page in the person's browser,
+so keys never pass through the agent. The PostHog sign-in carries exactly the scopes `orion pull` needs. Keys and
+sign-ins live outside the project (`~/.config/orion/`, readable only by you). For CI, environment variables still
+work: POSTHOG_PERSONAL_API_KEY (scopes query:read, project:read, batch_export:read and batch_export:write),
+ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY, and TYPESAFE_API_KEY.
 
 The site must run Orion's browser script on top of PostHog, so `orion_input` events exist. For self-report labels it
 also needs `selfReport` on (see orion-deploy).
