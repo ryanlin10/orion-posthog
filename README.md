@@ -31,7 +31,7 @@ nothing. Event contents: [docs/data-format.md](docs/data-format.md).
 ## Train
 
 ```sh
-pip install "paradigm-orion[sequence] @ git+https://github.com/ryanlin10/orion-posthog"   # Python 3.11+
+uv tool install "paradigm-orion[sequence] @ git+https://github.com/ryanlin10/orion-posthog"   # or pipx install; Python 3.11+
 orion init
 orion pull --since 30d --recipe recipes/checkout-sentiment.yaml
 orion train recipes/checkout-sentiment.yaml

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, cp, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runAgent } from '../setup/agent.js';
 import { brief, manualSteps, optionsLiteral, scriptSrc } from '../setup/brief.js';
-import { claudeEvent, codexEvent, runCodingAgent } from '../setup/coding-agents.js';
+import { claudeEvent, codexEvent, onPath, runCodingAgent } from '../setup/coding-agents.js';
 import { createWorkspace, diffLines, restore, snapshot, ToolError } from '../setup/files.js';
 import { findKey, readKeys, saveKeys } from '../setup/keys.js';
 import { main } from '../setup/main.js';
@@ -15,6 +15,8 @@ import { detect, installCommand, posthogPlaces, vendorDir } from '../setup/proje
 import { createClient, providerFor } from '../setup/providers.js';
 import { createUI } from '../setup/ui.js';
 import { findProject, orionEvents, waitForEvents } from '../setup/verify.js';
+import { signIn } from '../setup/posthog-auth.js';
+import { localUrl, serveFolder, startDevServer } from '../setup/run-app.js';
 
 const APPS = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'apps');
 
@@ -225,6 +227,7 @@ for (const provider of ['anthropic', 'openai', 'gemini']) {
     } else {
       assert.match(requests[0].url, /\/v1beta\/models\/gemini-3\.8-flash:generateContent$/);
       assert.equal(requests[0].headers['x-goog-api-key'], 'test-key');
+      assert.deepEqual(requests[0].body.generationConfig.thinkingConfig, { thinkingLevel: 'low' });
       assert.ok(!JSON.stringify(requests[0].body.tools).includes('additionalProperties'));
       assert.equal(second.contents[1].parts[0].thoughtSignature, 'ts-1', 'thought signatures go back unchanged');
       assert.deepEqual(second.contents[2].parts.map(p => [p.functionResponse.name, p.functionResponse.id]), [['list_files', 'fc_1_0'], ['read_file', 'fc_1_1']]);
@@ -321,9 +324,56 @@ test('verify: finds the project by its public key across regions, then counts Or
   assert.equal(first.count, 0);
   assert.match(calls.at(-1).body.query.query, /event in \('orion_session_start', 'orion_input'\)/);
   assert.match(calls.at(-1).body.query.query, /interval 91 second/);
+  await orionEvents({ host: place.host, key: 'phx', projectId: 2, seconds: 10, siteHost: '127.0.0.1:4567', fetch });
+  assert.match(calls.at(-1).body.query.query, /and properties\.\$host = '127\.0\.0\.1:4567'/);
   const found = await waitForEvents({ host: place.host, key: 'phx', projectId: 2, since: Date.now(), fetch, sleep: async () => {} });
   assert.deepEqual(found, { count: 12, latest: '2026-10-12T20:00:00Z', browser: 'Chrome', host: 'localhost:5173' });
   await assert.rejects(findProject({ key: 'phx', fetch: async () => json({}, 403) }), /query:read/);
+});
+
+test('verify: project-scoped OAuth reads approved projects without enumerating the organization', async () => {
+  const calls = [];
+  const fetch = async url => {
+    calls.push(url);
+    if (url.endsWith('/api/projects/')) return json({}, 403);
+    return json({ id: 7, name: 'Approved project', api_token: 'public-token' });
+  };
+  const place = await findProject({ key: 'oauth-token', token: 'public-token', region: 'us', projectIds: [7], fetch });
+  assert.equal(place.project.id, 7);
+  assert.deepEqual(calls, ['https://us.posthog.com/api/projects/7/']);
+  const empty = await findProject({ key: 'oauth-token', region: 'us', projectIds: [], fetch });
+  assert.deepEqual(empty.projects, []);
+  assert.equal(calls.length, 1, 'an empty OAuth grant must not fall back to listing all projects');
+});
+
+test('providers: exhausted daily quota fails promptly with a readable fallback, transient rate limits retry', async () => {
+  let requests = 0;
+  const client = createClient({ provider: 'gemini', model: 'gemini-3.8-flash', key: 'secret-test-key', system: '', prompt: '', tools: [],
+    fetch: async () => { requests++; return json({ error: { details: [{ violations: [{ quotaId: 'GenerateRequestsPerDay' }] }] } }, 429); },
+    sleep: async () => assert.fail('daily quota must not be retried') });
+  await assert.rejects(client.send(), /quota is exhausted.*Try another editor/);
+  assert.equal(requests, 1);
+  const retries = [];
+  const transient = createClient({ provider: 'gemini', model: 'gemini-3.8-flash', key: 'secret-test-key', system: '', prompt: '', tools: [], onRetry: step => retries.push(step),
+    fetch: async () => ++requests < 3 ? json({ error: { message: 'rate limited' } }, 429)
+      : json({ candidates: [{ content: { role: 'model', parts: [{ text: 'Done' }] } }] }), sleep: async () => {} });
+  assert.equal((await transient.send()).text, 'Done');
+  assert.equal(requests, 3);
+  assert.deepEqual(retries, ['Gemini is busy (HTTP 429); retrying in 2s (2/4)']);
+});
+
+test('tool discovery: respects PATH precedence and finds native user installs when PATH omits them', async t => {
+  if (process.platform === 'win32') return t.skip('Unix native install paths');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'orion-path-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const local = path.join(home, '.local', 'bin');
+  const preferred = path.join(home, 'preferred');
+  await mkdir(local, { recursive: true });
+  await mkdir(preferred);
+  for (const dir of [local, preferred]) await writeFile(path.join(dir, 'uv'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  assert.equal(await onPath('uv', { HOME: home, PATH: '/nonexistent' }), path.join(local, 'uv'));
+  assert.equal(await onPath('uv', { HOME: home, PATH: preferred }), path.join(preferred, 'uv'));
+  assert.equal(await onPath('missing', { HOME: home, PATH: preferred }), null);
 });
 
 test('main: a no-questions run with Orion\'s agent edits the app, shows the change, and keeps it', async () => {
@@ -337,7 +387,11 @@ test('main: a no-questions run with Orion\'s agent edits the app, shows the chan
   output.on('data', chunk => { printed += chunk; });
   const ui = createUI({ input: new PassThrough(), output, interactive: false, color: false });
   const { fetch, requests } = fakeProvider('anthropic');
-  const env = { PATH: '', ANTHROPIC_API_KEY: 'test-key', ORION_KEYS_FILE: path.join(dir, 'no-keys.env') };
+  const env = { PATH: '', HOME: dir, ANTHROPIC_API_KEY: 'test-key', ORION_KEYS_FILE: path.join(dir, 'no-keys.env') };
+  if (process.platform !== 'win32') {
+    await mkdir(path.join(dir, '.local', 'bin'), { recursive: true });
+    await writeFile(path.join(dir, '.local', 'bin', 'uv'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  }
   const code = await main(['--dir', dir, '--yes', '--agent', 'api'], { ui, env, fetch });
   assert.equal(code, 0, printed);
   assert.match(requests[0].body.messages[0].content, /orion\.connect\(posthog, \{ mask: 'timing', mood: true \}\)/);
@@ -346,6 +400,7 @@ test('main: a no-questions run with Orion\'s agent edits the app, shows the chan
   assert.match(printed, /M src\/main\.tsx  \+2 −0\n│      import App from '\.\/App'\n│    \+ import \{ orion \} from '@paradigmmachines\/orion'/);
   assert.match(printed, /│    \+ orion\.connect\(posthog, \{ mask: 'timing', mood: true \}\)/);
   assert.match(printed, /Orion is set up\./);
+  if (process.platform !== 'win32') assert.ok(printed.includes(`'${dir}/.local/bin/uv' tool install`), 'the final command must work even when uv is outside PATH');
   await rm(dir, { recursive: true });
 });
 
@@ -412,4 +467,95 @@ test('main: refuses to run in the home folder', async () => {
   assert.equal(await main(['--dir', os.homedir(), '--yes'], { ui, env: { PATH: '' } }), 1);
   assert.match(printed, /is your home folder, not an app/);
   assert.doesNotMatch(printed, /Your project/, 'stops before reading anything');
+});
+
+// A fake PostHog OAuth server: registration, token and revoke; `approve` plays the developer in the browser.
+function fakeOAuth() {
+  const calls = [];
+  const fetch = async (url, init) => {
+    const body = init.headers['content-type'] === 'application/json' ? JSON.parse(init.body) : Object.fromEntries(new URLSearchParams(String(init.body)));
+    calls.push({ url, body });
+    if (url.endsWith('/oauth/register/')) return json({ client_id: 'orion-client' }, 201);
+    if (url.endsWith('/oauth/token/')) return body.code === 'good' ? json({ access_token: 'pha_token', posthog_region: 'eu', scoped_teams: [7] }) : json({ error: 'invalid_grant' }, 400);
+    if (url.endsWith('/oauth/revoke/')) return json({});
+    return json({}, 404);
+  };
+  return { calls, fetch };
+}
+
+async function approve(local, params) {
+  const authorize = new URL((await globalThis.fetch(local, { redirect: 'manual' })).headers.get('location'));
+  const back = new URL(authorize.searchParams.get('redirect_uri'));
+  back.search = new URLSearchParams({ state: authorize.searchParams.get('state'), ...params });
+  const page = await (await globalThis.fetch(back)).text();
+  return { authorize, page };
+}
+
+test('sign-in: registers a client, opens a short local link, and trades the approval for a read-only token', async () => {
+  const { calls, fetch } = fakeOAuth();
+  let browser;
+  const session = await signIn({ fetch, open: url => { browser = approve(url, { code: 'good' }); } });
+  const seen = await browser;
+  assert.equal(session.key, 'pha_token');
+  assert.equal(session.region, 'eu');
+  assert.deepEqual(session.projectIds, [7]);
+  assert.equal(seen.authorize.origin + seen.authorize.pathname, 'https://oauth.posthog.com/oauth/authorize/');
+  assert.equal(seen.authorize.searchParams.get('scope'), 'project:read query:read');
+  assert.equal(seen.authorize.searchParams.get('code_challenge_method'), 'S256');
+  assert.match(seen.page, /PostHog approval received/);
+  assert.deepEqual(calls[0].body.redirect_uris, [seen.authorize.searchParams.get('redirect_uri')]);
+  assert.match(calls[0].body.redirect_uris[0], /^http:\/\/127\.0\.0\.1:\d+\/callback$/);
+  const token = calls.find(c => c.url.endsWith('/oauth/token/')).body;
+  assert.equal(token.client_id, 'orion-client');
+  assert.ok(token.code_verifier.length >= 43);
+  await session.revoke();
+  assert.equal(calls.at(-1).body.token, 'pha_token');
+});
+
+test('sign-in: a refusal in the browser is an error, and Enter in the terminal ends it quietly', async () => {
+  const { fetch } = fakeOAuth();
+  await assert.rejects(signIn({ fetch, open: url => { approve(url, { error: 'access_denied' }); } }), /not approved \(access_denied\)/);
+  const stop = new AbortController();
+  assert.equal(await signIn({ fetch, signal: stop.signal, open: () => stop.abort() }), null);
+});
+
+test('run-app: finds the address a dev server prints, stops it, and serves plain-HTML sites', async () => {
+  assert.equal(localUrl('  \x1b[32m➜\x1b[39m  Local:   \x1b[36mhttp://localhost:\x1b[1m5173\x1b[22m/\x1b[39m'), 'http://localhost:5173/');
+  assert.equal(localUrl('- Local:        http://0.0.0.0:3000'), 'http://localhost:3000');
+  assert.equal(localUrl('compiling…'), null);
+
+  const script = "require('http').createServer((q, s) => s.end('hi')).listen(0, '127.0.0.1', function () { console.log('ready on http://127.0.0.1:' + this.address().port + '/') })";
+  const app = await startDevServer(`node -e "${script}"`, { cwd: os.tmpdir(), wait: 10_000 });
+  assert.match(app.url, /^http:\/\/127\.0\.0\.1:\d+\/$/);
+  assert.equal(await (await globalThis.fetch(app.url)).text(), 'hi');
+  app.stop();
+  await new Promise(resolve => setTimeout(resolve, 300));
+  await assert.rejects(globalThis.fetch(app.url), 'the server and its children are gone');
+  const failed = await startDevServer('node -e "console.error(\'Missing script: dev\'); process.exit(1)"', { cwd: os.tmpdir() });
+  assert.equal(failed.url, null);
+  assert.equal(failed.exited, true);
+  assert.match(failed.output(), /Missing script/);
+
+  const site = await serveFolder(path.join(APPS, 'static-site'), { page: 'about.html' });
+  assert.match(site.url, /^http:\/\/127\.0\.0\.1:\d+\/about\.html$/);
+  const page = await globalThis.fetch(site.url);
+  assert.equal(page.headers.get('content-type'), 'text/html; charset=utf-8');
+  assert.equal((await globalThis.fetch(new URL('/missing.js', site.url))).status, 404);
+  site.stop();
+});
+
+test('ui: prose wraps on the rail, paths and coloured lines are cut', () => {
+  const output = new PassThrough();
+  Object.assign(output, { columns: 44 });
+  let printed = '';
+  output.on('data', chunk => { printed += chunk; });
+  const ui = createUI({ input: new PassThrough(), output, interactive: false, color: false });
+  ui.note('I changed only src/posthog.ts: it imports orion and calls orion.connect right after posthog.init.');
+  ui.step('Your project', ['/a/very/long/path/that/does/not/fit/on/one/line/at/all']);
+  assert.equal(printed, [
+    '│  I changed only src/posthog.ts: it',
+    '│  imports orion and calls orion.connect',
+    '│  right after posthog.init.',
+    '│', '◇  Your project',
+    '│  /a/very/long/path/that/does/not/fit/on/…', ''].join('\n'));
 });

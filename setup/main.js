@@ -10,11 +10,13 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { runAgent } from './agent.js';
 import { brief, manualSteps } from './brief.js';
-import { CODING_AGENTS, findCodingAgents, runCodingAgent } from './coding-agents.js';
+import { CODING_AGENTS, findCodingAgents, onPath, runCodingAgent, stopCodingAgents } from './coding-agents.js';
 import { createWorkspace, diffLines, restore, snapshot } from './files.js';
 import { findKey, keysFile, saveKeys } from './keys.js';
 import { detect, installCommand, LOCKFILES, PACKAGE, vendorDir } from './project.js';
+import { signIn } from './posthog-auth.js';
 import { checkKey, DEFAULT_MODELS, KEY_NAMES, NAMES, PROVIDERS, providerFor } from './providers.js';
+import { serveFolder, startDevServer } from './run-app.js';
 import { Cancelled, createUI } from './ui.js';
 import { findProject, HOSTS, SCOPES, waitForEvents } from './verify.js';
 
@@ -22,6 +24,7 @@ const REPO = 'ryanlin10/orion-posthog';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const VERSION = '0.3.0';
 const POSTHOG_KEY = 'POSTHOG_PERSONAL_API_KEY';
+const PYTHON_PACKAGE = `paradigm-orion @ git+https://github.com/${REPO}`;
 
 const HELP = `Orion setup: adds Orion to the web app in this folder.
 
@@ -38,7 +41,10 @@ Usage: npx github:${REPO} [options]
   -h, --help           This help
 `;
 
+const STOP_SIGNALS = process.platform === 'win32' ? ['SIGINT'] : ['SIGINT', 'SIGTERM', 'SIGHUP'];
+
 const tilde = dir => (dir.startsWith(os.homedir()) ? `~${dir.slice(os.homedir().length)}` : dir);
+const lastLines = (text, n) => text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').trim().split('\n').filter(l => l.trim()).slice(-n);
 
 function run(command, args, options = {}) {
   return new Promise(resolve => {
@@ -117,7 +123,7 @@ async function setup(args, ui, env, fetch) {
     const next = await ui.select({ message: 'What now?', initial: 'verify', options: [
       { value: 'verify', label: 'Check that its events arrive' }, { value: 'again', label: 'Set it up again' }, { value: 'stop', label: 'Stop' }] });
     if (next === 'stop') { ui.outro('Nothing changed.'); return 0; }
-    if (next === 'verify') return finish(args, ui, project, env, fetch, { coding: [] });
+    if (next === 'verify') return finish(args, ui, project, env, fetch, { coding: await findCodingAgents(env) });
   }
 
   if (!project.posthog.kind) {
@@ -133,7 +139,7 @@ async function setup(args, ui, env, fetch) {
     await ui.roomFor({ columns: 80, rows: 28, message: 'PostHog\'s wizard needs a bigger window' });
     ui.step('Handing over to PostHog\'s wizard', [
       `In its menu choose ${c.bold('Continue')} (installs PostHog). Its other options don't add PostHog.`,
-      c.dim('Orion carries on when it closes.')]);
+      c.dim('It signs you in through the browser and takes about five minutes. Orion carries on when it closes.')]);
     // Ctrl-C there is meant for PostHog's wizard; Orion stays to say what happened.
     const stay = () => {};
     process.on('SIGINT', stay);
@@ -175,24 +181,30 @@ async function setup(args, ui, env, fetch) {
     { value: 'api', label: key ? `Orion's agent, with your ${NAMES[key.provider]} key` : 'Orion\'s agent, with an API key',
       hint: key ? `from ${tilde(key.from)}` : rejected ? `the saved ${NAMES[rejected.provider]} key was rejected; paste another`
         : 'Anthropic, OpenAI or Gemini; kept on this machine for the training tools too' },
-    ...coding.map(a => ({ value: a.id, label: a.name, hint: 'already on this machine and signed in, so no key needed' })),
+    ...coding.map(a => ({ value: a.id, label: a.name, hint: a.signedIn === false ? `installed but not signed in: run ${a.bin} once to sign in`
+      : `already on this machine${a.signedIn ? ' and signed in' : ''}, so no key needed` })),
     { value: 'manual', label: 'Show me the code', hint: 'paste it in yourself' },
   ];
   let editor = args.agent ?? await ui.select({ message: 'Who should make the edit?', options: editors,
-    initial: key ? 'api' : coding[0]?.id ?? 'api' });
+    initial: key ? 'api' : coding.find(a => a.signedIn !== false)?.id ?? 'api' });
   ui.note(c.dim(editor === 'manual' ? 'Nothing is sent to any AI.' : 'The agent reads your source files to make the edit. .env files stay closed.'));
 
   const before = await snapshot(root);
-  // From here until the review, stopping (Ctrl-C, Esc) puts every file back as it was.
-  const onInterrupt = async () => {
-    process.off('SIGINT', onInterrupt);
+  // From here until the review, stopping (Ctrl-C, Esc, or closing the terminal) puts every file back as it was.
+  let stopping = false;
+  const onInterrupt = async signal => {
+    // Stay subscribed: a second signal (closing a terminal can send several) must not kill the restore halfway.
+    if (stopping) return;
+    stopping = true;
+    process.stdout.on('error', () => {});  // the terminal may be gone (SIGHUP): files first, words if they still land
+    stopCodingAgents();
+    const left = await restore(root, await before.changes());
     ui.halt();
-    ui.warn('Stopping. Putting your files back.');
-    await undo(ui, root, await before.changes());
-    ui.outro('Setup stopped. Nothing changed.');
-    process.exit(130);
+    ui.warn('Stopped. Your files are back as they were.', left.length ? ['These were too big to keep a copy of, so they stay changed:', ...left] : []);
+    ui.outro('Setup stopped.');
+    process.exit(128 + (os.constants.signals[signal] ?? 2));
   };
-  process.on('SIGINT', onInterrupt);
+  for (const s of STOP_SIGNALS) process.on(s, onInterrupt);
   try {
     const vendor = project.posthog.kind === 'snippet' ? vendorDir(project) : null;
     if (project.posthog.kind === 'npm' && !project.orion.installed) {
@@ -204,7 +216,8 @@ async function setup(args, ui, env, fetch) {
       const landed = await stat(path.join(project.packageDir, 'node_modules', ...PACKAGE.split('/'), 'package.json')).then(() => true, () => false);
       if (landed && result.code !== 0) {
         spin.stop(`Installed ${PACKAGE} with ${command}`);
-        ui.warn(`${command} also reported a problem with other packages:`, result.output.trim().split('\n').filter(l => l.trim()).slice(-4));
+        ui.note([c.dim(`${command} also printed warnings about other packages (not Orion):`),
+          ...result.output.trim().split('\n').filter(l => l.trim()).slice(-4).map(l => c.dim(`  ${l.trim()}`))]);
       } else if (!landed && result.code !== 0) {  // Yarn PnP keeps no node_modules: exit code 0 is enough.
         spin.stop(`${command} could not install ${PACKAGE}`, false);
         ui.note(result.output.trim().split('\n').slice(-6).map(l => c.dim(l)));
@@ -246,7 +259,7 @@ async function setup(args, ui, env, fetch) {
     if (error instanceof Cancelled) await undo(ui, root, await before.changes());
     throw error;
   } finally {
-    process.off('SIGINT', onInterrupt);
+    for (const s of STOP_SIGNALS) process.off(s, onInterrupt);
   }
   return finish(args, ui, await detect(root), env, fetch, { coding });
 }
@@ -325,7 +338,7 @@ async function review(ui, project, options, changes, summary, vendor, editor) {
     if (diff.more) lines.push(c.dim(`    … ${diff.more} more lines`));
   }
   if (vendored.length) lines.push(`${c.green('A')} ${vendor}/ ${c.dim(`(${vendored.length} files of Orion's browser code)`)}`);
-  ui.step('Changes', lines.length ? lines : [c.dim('None')]);
+  ui.step('Changes', lines.length ? lines : [c.dim('None')], { cut: true });
   if (summary) ui.note(c.dim(plain(summary)));
   const code = changes.filter(ch => !vendored.includes(ch) && path.basename(ch.path) !== 'package.json' && !LOCKFILES.has(path.basename(ch.path)));
   if (!code.length && editor !== 'manual') {
@@ -376,68 +389,216 @@ async function undo(ui, root, changes) {
 
 async function finish(args, ui, project, env, fetch, { coding }) {
   const { c } = ui;
-  if (!args['no-verify'] && ui.interactive) await verify(ui, project, env, fetch);
-  if (ui.interactive) {
-    const skills = await ui.confirm({ message: 'Add Orion\'s skills to your coding agents?', initial: coding.length > 0, yes: 'Add them', no: 'Skip' });
-    if (skills) {
-      ui.note(c.dim(`Running npx skills add ${REPO}`));
-      await run('npx', ['-y', 'skills', 'add', REPO], { stdio: 'inherit', cwd: project.root });
-    }
-  }
+  // Orion is in by now, so Esc here skips the step rather than stopping setup.
+  const optional = step => step().catch(error => { if (!(error instanceof Cancelled)) throw error; });
+  if (!args['no-verify'] && ui.interactive) await optional(() => verify(ui, project, env, fetch));
+  if (ui.interactive) await optional(() => addSkills(ui, project, env, coding));
+  // uv and pipx install a command-line tool into its own environment; a bare pip often refuses (PEP 668) or lands elsewhere.
+  const toolCommand = file => env.PATH?.split(path.delimiter).includes(path.dirname(file)) ? path.basename(file) : `'${file.replaceAll("'", "'\\''")}'`;
+  const uv = await onPath('uv', env), pipx = uv ? null : await onPath('pipx', env);
+  const python = uv ? `${toolCommand(uv)} tool install "${PYTHON_PACKAGE}"` : pipx ? `${toolCommand(pipx)} install "${PYTHON_PACKAGE}"`
+    : `pip install "${PYTHON_PACKAGE}"`;
   ui.outro('Orion is set up.', [
-    `${c.dim('Train a sentiment model')}  pip install "paradigm-orion @ git+https://github.com/${REPO}"  ${c.dim('then')}  orion init`,
-    `${c.dim('Docs')}                     https://github.com/${REPO}#readme`,
+    c.dim('Once data has come in, train a sentiment model:'),
+    `  ${python}`,
+    '  orion init',
+    `${c.dim('Docs')}  https://github.com/${REPO}#readme`,
   ]);
   return 0;
+}
+
+// The coding agents `npx skills add` can install for, with how to tell one is in use here.
+const SKILL_AGENTS = [
+  { id: 'claude-code', name: 'Claude Code', coding: 'claude', files: ['.claude', 'CLAUDE.md'] },
+  { id: 'codex', name: 'Codex', coding: 'codex', files: ['AGENTS.md', '.codex'] },
+  { id: 'cursor', name: 'Cursor', bin: 'cursor-agent', files: ['.cursor', '.cursorrules'] },
+  { id: 'github-copilot', name: 'GitHub Copilot', files: ['.github/copilot-instructions.md'] },
+  { id: 'gemini-cli', name: 'Gemini CLI', bin: 'gemini', files: ['.gemini', 'GEMINI.md'] },
+  { id: 'windsurf', name: 'Windsurf', files: ['.windsurf', '.windsurfrules'] },
+];
+
+async function addSkills(ui, project, env, coding) {
+  const { c } = ui;
+  const exists = rel => stat(path.join(project.root, rel)).then(() => true, () => false);
+  const used = await Promise.all(SKILL_AGENTS.map(async a => coding.some(x => x.id === a.coding) ||
+    (a.bin && Boolean(await onPath(a.bin, env))) || (await Promise.all(a.files.map(exists))).some(Boolean)));
+  const picked = await ui.multiselect({ message: 'Add Orion\'s skills for your coding agents?',
+    initial: SKILL_AGENTS.filter((a, i) => used[i]).map(a => a.id),
+    options: SKILL_AGENTS.map((a, i) => ({ value: a.id, label: a.name, hint: used[i] ? 'in use here' : '' })) });
+  if (!picked.length) return;
+  const command = ['skills', 'add', REPO, '--skill', '*', '--agent', ...picked, '--yes'];
+  const spin = ui.spinner();
+  spin.start('Adding Orion\'s skills');
+  const result = await run('npx', ['-y', ...command], { cwd: project.root, env: { ...env, FORCE_COLOR: '0', NO_COLOR: '1' } });
+  const names = SKILL_AGENTS.filter(a => picked.includes(a.id)).map(a => a.name).join(', ');
+  if (result.code === 0) {
+    spin.stop(`Added Orion's skills for ${names}`);
+    const folders = [picked.includes('claude-code') && '.claude/skills/', picked.some(id => id !== 'claude-code') && '.agents/skills/'].filter(Boolean);
+    ui.note(c.dim(`In ${folders.join(' and ')}. Ask your agent about Orion once data has come in; orion-train covers training.`));
+  } else {
+    spin.stop('Could not add the skills', false);
+    ui.note(lastLines(result.output, 4).map(l => c.dim(l)));
+    ui.note(`Add them later: npx ${command.map(a => (a === '*' ? '\'*\'' : a)).join(' ')}`);
+  }
+}
+
+/** Runs `stop` if the process ends while something it started (a server in its own process group) is still up. */
+function stopOnExit(stop) {
+  const onSignal = signal => { stop(); process.exit(128 + (os.constants.signals[signal] ?? 1)); };
+  process.on('exit', stop);
+  for (const s of STOP_SIGNALS) process.on(s, onSignal);
+  return () => { process.off('exit', stop); for (const s of STOP_SIGNALS) process.off(s, onSignal); stop(); };
 }
 
 async function verify(ui, project, env, fetch) {
   const { c } = ui;
   let found = await findKey(POSTHOG_KEY, env);
-  if (!found) {
-    const how = await ui.select({ message: 'Watch for Orion\'s first events in PostHog?', initial: 'paste', options: [
-      { value: 'paste', label: 'Paste a personal API key', hint: `needs ${SCOPES}` },
-      { value: 'open', label: 'Open PostHog to create one', hint: `choose the ${SCOPES} scopes` },
-      { value: 'skip', label: 'Skip the check' }] });
-    if (how === 'skip') return;
-    if (how === 'open') openUrl(`${HOSTS[project.posthog.region ?? 'us']}/settings/user-api-keys`);
-    const value = await ui.text({ message: 'PostHog personal API key', secret: true, placeholder: 'phx_…' });
-    if (!value) return;
-    found = { value, from: 'typed' };
-  }
-  let place;
+  let session = null, place = null, app = null;
   try {
-    place = await findProject({ key: found.value, token: project.posthog.token, region: project.posthog.region, fetch });
-  } catch (error) {
-    ui.warn(`Cannot check events: ${error.message}.`);
-    return;
+    while (!place) {
+      if (!found) {
+        const how = await ui.select({ message: 'Watch for Orion\'s first events in PostHog?', initial: 'signin', options: [
+          { value: 'signin', label: 'Sign in to PostHog in the browser', hint: 'read-only, for this check only; nothing is saved' },
+          { value: 'paste', label: 'Paste a personal API key', hint: `with the ${SCOPES} scopes` },
+          { value: 'skip', label: 'Skip the check' }] });
+        if (how === 'skip') return;
+        if (how === 'signin') {
+          await session?.revoke();
+          session = await browserSignIn(ui, fetch, project.posthog.region);
+          if (!session) continue;
+          found = { value: session.key, from: 'signin', region: session.region ?? project.posthog.region, projectIds: session.projectIds };
+        } else {
+          const value = await ui.text({ message: 'PostHog personal API key', secret: true, placeholder: 'phx_…' });
+          if (!value) continue;
+          found = { value, from: 'typed' };
+        }
+      }
+      try {
+        place = await findProject({ key: found.value, token: project.posthog.token, region: found.region ?? project.posthog.region,
+          projectIds: found.projectIds, fetch });
+      } catch (error) {
+        ui.warn(`Cannot check events: ${error.message}.`, ['typed', 'signin'].includes(found.from) ? [] : [`That key came from ${tilde(found.from)}.`]);
+        if (!error.status) return;  // PostHog unreachable: asking again will not help
+        found = null;
+      }
+    }
+    if (found.from === 'typed') {
+      ui.note(c.dim('Orion\'s training tools (orion pull) can use this key too if it also has the batch_export:read and batch_export:write scopes.'));
+      if (await ui.confirm({ message: `Keep the key for Orion's training tools in ${tilde(keysFile(env))}?`, yes: 'Keep it', no: 'Just this run' })) {
+        await saveKeys({ [POSTHOG_KEY]: found.value }, env);
+      }
+    }
+    let chosen = place.project;
+    if (!chosen) {
+      if (!place.projects.length) { ui.warn('The key sees no PostHog projects.'); return; }
+      const id = await ui.select({ message: 'Which PostHog project does this app send to?', options: place.projects.map(p => ({ value: p.id, label: p.name, hint: `id ${p.id}` })) });
+      chosen = place.projects.find(p => p.id === id);
+    }
+    app = await openApp(ui, project, env);
+    const spin = ui.spinner();
+    spin.start(`Waiting for Orion's first events in ${chosen.name}  ${c.dim('Enter skips')}`);
+    const skip = ui.skippable();
+    let events = null;
+    const since = Date.now();
+    let explainedWait = false;
+    try {
+      events = await waitForEvents({ host: place.host, key: found.value, projectId: chosen.id, since,
+        siteHost: app?.url ? new URL(app.url).host : undefined, signal: skip.signal, fetch,
+        onCheck: ({ count }) => {
+          if (!count && !explainedWait && Date.now() - since >= 60_000) {
+            explainedWait = true;
+            spin.log('No events yet. Check the browser Console and Network for a blocked PostHog script or request. Enter skips this check.');
+          }
+        } });
+    } catch (error) {
+      spin.stop(`Could not check: ${error.message}`, false);
+      return;
+    } finally {
+      skip.done();
+    }
+    if (events) {
+      spin.stop(`Orion is live: ${events.count} event${events.count > 1 ? 's' : ''}${events.browser ? ` from ${events.browser}` : ''}${events.host ? ` on ${events.host}` : ''}`);
+      ui.note(c.dim(`${place.host}/project/${chosen.id}/activity/explore`));
+    } else {
+      spin.stop(skip.signal.aborted ? 'Skipped. Orion\'s events show up in PostHog as orion_input once the app runs'
+        : 'No Orion events arrived. Check that PostHog loads in your browser, then run the check again.', skip.signal.aborted);
+    }
+  } finally {
+    app?.stop();
+    await session?.revoke();
   }
-  if (found.from === 'typed' && await ui.confirm({ message: `Keep the key for Orion's training tools in ${tilde(keysFile(env))}?`, yes: 'Keep it', no: 'Just this run' })) {
-    await saveKeys({ [POSTHOG_KEY]: found.value }, env);
-  }
-  let chosen = place.project;
-  if (!chosen) {
-    if (!place.projects.length) { ui.warn('The key sees no PostHog projects.'); return; }
-    const id = await ui.select({ message: 'Which PostHog project does this app send to?', options: place.projects.map(p => ({ value: p.id, label: p.name, hint: `id ${p.id}` })) });
-    chosen = place.projects.find(p => p.id === id);
-  }
-  ui.step('Now open your app', [`${project.devCommand ? `Start it (${c.cyan(project.devCommand)}), open` : 'Open'} it in a browser, and move the cursor around.`]);
+}
+
+/**
+ * PostHog's sign-in page in the browser; null when the developer cancels or it fails (they choose again). With the
+ * app's region known it goes straight to that region's sign-in, which saves a "US or EU?" page.
+ */
+async function browserSignIn(ui, fetch, region) {
+  const { c } = ui;
   const spin = ui.spinner();
-  spin.start(`Waiting for Orion's first events in ${chosen.name}  ${c.dim('Enter skips')}`);
+  spin.start(`Waiting for you to approve Orion in PostHog  ${c.dim('Enter cancels')}`);
   const skip = ui.skippable();
-  let events = null;
   try {
-    events = await waitForEvents({ host: place.host, key: found.value, projectId: chosen.id, since: Date.now(), signal: skip.signal, fetch });
+    const session = await signIn({ open: openUrl, fetch, signal: skip.signal, ...(HOSTS[region] && { base: HOSTS[region] }),
+      onUrl: url => spin.log(`If no browser opened, go to ${url}`) });
+    spin.stop(session ? 'Signed in to PostHog' : 'Sign-in cancelled', Boolean(session));
+    return session;
   } catch (error) {
-    spin.stop(`Could not check: ${error.message}`, false);
-    return;
+    spin.stop(error.message, false);
+    return null;
   } finally {
     skip.done();
   }
-  if (events) {
-    spin.stop(`Orion is live: ${events.count} event${events.count > 1 ? 's' : ''}${events.browser ? ` from ${events.browser}` : ''}${events.host ? ` on ${events.host}` : ''}`);
-    ui.note(c.dim(`${place.host}/project/${chosen.id}/activity/explore`));
-  } else {
-    spin.stop('Skipped. Orion\'s events show up in PostHog as orion_input once the app runs', true);
+}
+
+/**
+ * Gets the app in front of the developer for the event check: starts its dev script or serves a plain-HTML site,
+ * opens it in the browser, and returns { stop } for whatever it started (null when they open it themselves).
+ */
+async function openApp(ui, project, env) {
+  const { c } = ui;
+  const serve = !project.devCommand && project.posthog.kind === 'snippet';
+  if (!project.devCommand && !serve) {
+    ui.step('Now open your app', ['Start it, open it in a browser, and move the cursor around.']);
+    return null;
   }
+  const how = await ui.select({ message: 'Open your app so Orion sends its first events', initial: 'start', options: [
+    { value: 'start', label: serve ? 'Serve this folder and open it in the browser' : `Start it for me (${project.devCommand}) and open the browser`,
+      hint: 'it stops when the check ends' },
+    { value: 'self', label: 'I\'ll open it myself', hint: serve ? 'through a web server: pages opened as files cannot load Orion' : 'it is running already, or starts another way' }] });
+  if (how === 'self') {
+    ui.note(c.dim('Open it in a browser and move the cursor around.'));
+    return null;
+  }
+  if (serve) {
+    // A site with a public/ folder is served from it (that is where its root-relative /orion/auto.js resolves).
+    const sub = vendorDir(project).startsWith('public/') ? 'public' : '';
+    const first = project.posthog.places[0].file;
+    const page = !sub ? first : first.startsWith(`${sub}/`) ? first.slice(sub.length + 1) : 'index.html';
+    const site = await serveFolder(path.join(project.root, sub), { page });
+    const done = stopOnExit(site.stop);
+    ui.step(`Serving ${sub ? `${sub}/` : 'this folder'} at ${site.url}`, [c.dim('Opened it in the browser. Move the cursor around in the page.')]);
+    openUrl(site.url);
+    return { stop: done, url: site.url };
+  }
+  const spin = ui.spinner();
+  spin.start(`Starting your app (${project.devCommand})`);
+  const app = await startDevServer(project.devCommand, { cwd: project.packageDir ?? project.root, env });
+  const done = stopOnExit(app.stop);
+  if (app.exited) {
+    spin.stop(`${project.devCommand} stopped`, false);
+    ui.note(lastLines(app.output(), 6).map(l => c.dim(l)));
+    ui.note('Start it yourself, open it in a browser, and move the cursor around.');
+    done();
+    return null;
+  }
+  if (!app.url) {
+    spin.stop(`${project.devCommand} is running`);
+    ui.note('Open it in a browser once it is up, and move the cursor around.');
+    return { stop: done };
+  }
+  spin.stop(`Your app is running at ${app.url}`);
+  ui.note(c.dim('Opened it in the browser. Move the cursor around in the page.'));
+  openUrl(app.url);
+  return { stop: done, url: app.url };
 }

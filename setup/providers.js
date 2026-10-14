@@ -25,28 +25,43 @@ export function providerFor(model) {
 
 const base = (provider, env = process.env) => (env[`ORION_${provider.toUpperCase()}_URL`] || BASE[provider]).replace(/\/+$/, '');
 
-async function post(name, url, headers, body, { fetch = globalThis.fetch, sleep, attempts = 4 } = {}) {
+async function post(name, url, headers, body, { fetch = globalThis.fetch, sleep, attempts = 4, onRetry = () => {} } = {}) {
   for (let attempt = 0; ; attempt++) {
     let response;
     try {
       response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers },
-        body: JSON.stringify(body), signal: AbortSignal.timeout(300_000) });
+        body: JSON.stringify(body), signal: AbortSignal.timeout(60_000) });
     } catch (error) {
-      if (attempt < attempts - 1) { await (sleep ?? wait)(2000 * 2 ** attempt); continue; }
+      if (attempt < attempts - 1) {
+        const delay = 2000 * 2 ** attempt;
+        onRetry(`${name} did not respond; retrying in ${delay / 1000}s (${attempt + 2}/${attempts})`);
+        await (sleep ?? wait)(delay);
+        continue;
+      }
       throw new ProviderError(`Could not reach ${name}: ${error.cause?.code ?? error.message}`);
     }
     const text = await response.text();
     if (response.ok) {
       try { return JSON.parse(text); } catch { throw new ProviderError(`${name} replied with something other than JSON`); }
     }
+    let failure;
+    try { failure = JSON.parse(text).error; } catch { /* non-JSON provider error */ }
+    const exhausted = response.status === 429 && (
+      failure?.code === 'insufficient_quota' || failure?.type === 'insufficient_quota' ||
+      (Array.isArray(failure?.details) && failure.details.some(detail => Array.isArray(detail.violations) &&
+        detail.violations.some(v => /perday/i.test(v.quotaId ?? '') || String(v.quotaValue) === '0'))));
+    if (exhausted) throw new ProviderError(`${name}'s API quota is exhausted. Try another editor, or check your provider's quota before retrying (HTTP 429)`, 429);
     if (RETRY.has(response.status) && attempt < attempts - 1) {
       const after = Number(response.headers.get('retry-after'));
-      await (sleep ?? wait)(Number.isFinite(after) && after > 0 ? Math.min(after, 60) * 1000 : 2000 * 2 ** attempt);
+      const delay = Number.isFinite(after) && after > 0 ? Math.min(after, 60) * 1000 : 2000 * 2 ** attempt;
+      onRetry(`${name} is busy (HTTP ${response.status}); retrying in ${delay / 1000}s (${attempt + 2}/${attempts})`);
+      await (sleep ?? wait)(delay);
       continue;
     }
     let detail = text.replace(/\s+/g, ' ').slice(0, 300);
     for (const value of Object.values(headers)) if (value.length > 12) detail = detail.replaceAll(value.replace(/^Bearer /, ''), '[key]');
-    const plainly = { 401: `${name} did not accept the API key`, 403: `${name} refused the API key`, 404: `${name} does not know that model` }[response.status];
+    const plainly = { 401: `${name} did not accept the API key`, 403: `${name} refused the API key`, 404: `${name} does not know that model`,
+      429: `${name} is limiting API requests or has no quota left. Try another editor, or retry later` }[response.status];
     throw new ProviderError(plainly ? `${plainly} (HTTP ${response.status})` : `${name} returned HTTP ${response.status}: ${detail}`, response.status);
   }
 }
@@ -57,8 +72,8 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const geminiSchema = schema => JSON.parse(JSON.stringify(schema, (key, value) => (key === 'additionalProperties' ? undefined : value)));
 
 /** A conversation with tools. send(results) returns { text, calls: [{ id, name, input }] }; no calls means done. */
-export function createClient({ provider, model, key, system, prompt, tools, fetch, sleep, env }) {
-  const options = { fetch, sleep };
+export function createClient({ provider, model, key, system, prompt, tools, fetch, sleep, env, onRetry }) {
+  const options = { fetch, sleep, onRetry };
   if (provider === 'anthropic') {
     const messages = [{ role: 'user', content: prompt }];
     let fallbacks = true;
@@ -125,7 +140,9 @@ export function createClient({ provider, model, key, system, prompt, tools, fetc
         const reply = await post('Gemini', `${base('gemini', env)}/v1beta/models/${encodeURIComponent(model)}:generateContent`, { 'x-goog-api-key': key }, {
           systemInstruction: { parts: [{ text: system }] }, contents,
           tools: [{ functionDeclarations: tools.map(t => ({ name: t.name, description: t.description, parameters: geminiSchema(t.parameters) })) }],
-          generationConfig: { maxOutputTokens: 16000 },
+          generationConfig: { maxOutputTokens: 16000,
+            // This is a small source edit. Keep Gemini 3's default reasoning from dominating each tool round trip.
+            ...(/^gemini-3(?:[.-])/.test(model) && { thinkingConfig: { thinkingLevel: 'low' } }) },
         }, options);
         const candidate = reply.candidates?.[0];
         if (!candidate?.content) throw new ProviderError(`Gemini gave no answer (${reply.promptFeedback?.blockReason ?? candidate?.finishReason ?? 'no candidates'})`);
