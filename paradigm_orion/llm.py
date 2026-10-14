@@ -176,7 +176,8 @@ class OpenAI(Provider):
 
 
 class Gemini(Provider):
-    provider, models_path, max_tokens, ping_tokens = "gemini", "/v1beta/models", 8192, 64  # Room for a thinking model.
+    # Thinking comes out of maxOutputTokens too: about 3,000-4,000 tokens per labelling call, and past 8,192 now and then.
+    provider, models_path, max_tokens, ping_tokens = "gemini", "/v1beta/models", 32768, 64
 
     def headers(self):
         return {"x-goog-api-key": self.api_key}
@@ -192,6 +193,10 @@ class Gemini(Provider):
         candidates = reply.get("candidates") or []
         if not candidates:
             raise LLMError(f"Gemini gave no answer ({(reply.get('promptFeedback') or {}).get('blockReason', 'no candidates')})")
+        if candidates[0].get("finishReason") == "MAX_TOKENS":
+            thinking = (reply.get("usageMetadata") or {}).get("thoughtsTokenCount")
+            raise LLMError("Gemini ran out of output tokens before finishing its answer"
+                           + (f" ({thinking} went to thinking)" if thinking else ""))
         parts = (candidates[0].get("content") or {}).get("parts") or []
         return "".join(part.get("text", "") for part in parts if not part.get("thought"))
 
