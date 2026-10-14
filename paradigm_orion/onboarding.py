@@ -262,24 +262,37 @@ def setup_labeller(ws, args):
         print("  No AI labeller for now; recipes can still use human and self-report labels.")
         return
     model = fixed if fixed and fixed.lower() not in PROVIDERS else ask_model(provider, saved)
-    name = KEY_NAMES[provider]
-    if not credentials.get(name):
+    if not credentials.get(KEY_NAMES[provider]):
         print(f"Get a {NAMES[provider]} key at {KEY_PAGES[provider]}")
-    check = None if args.no_check else (lambda key: verify(provider, key, split_model(model)[1]))
-    key = take_key(f"{NAMES[provider]} API key", name, check)
+    chosen = {"provider": provider}
+    check = None if args.no_check else (lambda key: check_labeller_key(key, split_model(model)[1], chosen))
+    key = take_key(f"{NAMES[provider]} API key", KEY_NAMES[provider], check)
+    if chosen["provider"] != provider:  # A Google Cloud key given for Gemini: Vertex AI from here on.
+        provider, key, model = chosen["provider"], chosen["key"], f"{chosen['provider']}:{split_model(model)[1]}"
     save_settings(ws, llm_model=model)
-    save_keys({name: key})
+    save_keys({KEY_NAMES[provider]: key})
+
+
+def check_labeller_key(key, model, chosen):
+    """verify, plus a second try on Vertex AI for a key the Gemini API refuses: Google Cloud keys are often allowed
+    only there. When Vertex AI takes the key, chosen switches to Vertex AI and keeps the key."""
+    ok, message = verify(chosen["provider"], key, model)
+    if ok is not False or chosen["provider"] != "gemini" or not verify("vertex", key, model)[0]:
+        return ok, message
+    chosen.update(provider="vertex", key=key)
+    return True, (f"That is a Google Cloud key for Vertex AI, not the Gemini API. Vertex AI accepted it and {model} answered, "
+                  "so Orion will run Gemini on Vertex AI.")
 
 
 def choose_provider(saved):
     default = provider_of(saved) or next((p for p in PROVIDERS if credentials.get(KEY_NAMES[p])), PROVIDERS[0])
     while True:
-        answer = ask_default("AI labeller: anthropic, openai, gemini or skip", default).lower()
+        answer = ask_default("AI labeller: anthropic, openai, gemini, vertex (Gemini on Google Cloud) or skip", default).lower()
         if answer in PROVIDERS:
             return answer
         if answer == "skip":
             return None
-        print("  Type anthropic, openai, gemini or skip.")
+        print("  Type anthropic, openai, gemini, vertex or skip.")
 
 
 def ask_model(provider, saved):

@@ -19,7 +19,7 @@ folder. In a terminal `orion init` asks there; from an agent's shell it opens a 
 so keys never pass through the agent. The PostHog sign-in carries exactly the scopes `orion pull` needs. Keys and
 sign-ins live outside the project (`~/.config/orion/`, readable only by you). For CI, environment variables still
 work: POSTHOG_PERSONAL_API_KEY (scopes query:read, project:read, batch_export:read and batch_export:write),
-ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY, and TYPESAFE_API_KEY.
+ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY or VERTEX_API_KEY, and TYPESAFE_API_KEY.
 
 The site must run Orion's browser script on top of PostHog, so `orion_input` events exist. For self-report labels it
 also needs `selfReport` on (see orion-deploy).

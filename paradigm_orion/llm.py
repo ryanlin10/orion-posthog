@@ -1,9 +1,11 @@
-"""The language model behind Orion's AI labellers: Anthropic, OpenAI or Gemini, called with the customer's own key.
+"""The language model behind Orion's AI labellers: Anthropic, OpenAI, Gemini or Gemini on Vertex AI (Google Cloud),
+called with the customer's own key.
 Every answer is cached in .orion/cache/llm.jsonl so rebuilding a dataset does not pay for the same labels twice.
 
 A model name picks its provider (claude-* is Anthropic, gpt-* and o3-style names are OpenAI, gemini-* is Gemini),
-or a prefix says it outright, e.g. openai:my-model. Keys come from credentials.get. ORION_ANTHROPIC_URL,
-ORION_OPENAI_URL and ORION_GEMINI_URL point the clients elsewhere (scheme and host, no /v1).
+or a prefix says it outright, e.g. openai:my-model; Vertex AI always takes its prefix, e.g. vertex:gemini-3.8-flash.
+Keys come from credentials.get. ORION_ANTHROPIC_URL, ORION_OPENAI_URL, ORION_GEMINI_URL and ORION_VERTEX_URL point
+the clients elsewhere (scheme and host, no /v1).
 """
 import hashlib
 import json
@@ -17,15 +19,20 @@ import urllib.request
 from . import credentials
 from .jev import MODEL as JEV_MODEL, URL as JEV_URL
 
-PROVIDERS = ("anthropic", "openai", "gemini")  # Also the order make_client looks for a saved key in.
-NAMES = {"anthropic": "Anthropic", "openai": "OpenAI", "gemini": "Gemini"}
-KEY_NAMES = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "gemini": "GEMINI_API_KEY"}
-DEFAULT_MODELS = {"anthropic": "claude-sonnet-5-5", "openai": "gpt-5.6-sol", "gemini": "gemini-3.8-flash"}
-BASE_URLS = {"anthropic": "https://api.anthropic.com", "openai": "https://api.openai.com", "gemini": "https://generativelanguage.googleapis.com"}
+PROVIDERS = ("anthropic", "openai", "gemini", "vertex")  # Also the order make_client looks for a saved key in.
+NAMES = {"anthropic": "Anthropic", "openai": "OpenAI", "gemini": "Gemini", "vertex": "Vertex AI"}
+KEY_NAMES = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "gemini": "GEMINI_API_KEY", "vertex": "VERTEX_API_KEY"}
+DEFAULT_MODELS = {"anthropic": "claude-sonnet-5-5", "openai": "gpt-5.6-sol", "gemini": "gemini-3.8-flash",
+                  "vertex": "vertex:gemini-3.8-flash"}
+BASE_URLS = {"anthropic": "https://api.anthropic.com", "openai": "https://api.openai.com",
+             "gemini": "https://generativelanguage.googleapis.com", "vertex": "https://aiplatform.googleapis.com"}
 KEY_PAGES = {"anthropic": "https://console.anthropic.com/settings/keys", "openai": "https://platform.openai.com/api-keys",
-             "gemini": "https://aistudio.google.com/apikey"}
+             "gemini": "https://aistudio.google.com/apikey", "vertex": "https://console.cloud.google.com/apis/credentials"}
 BILLING_PAGES = {"anthropic": "https://console.anthropic.com/settings/billing",
-                 "openai": "https://platform.openai.com/settings/organization/billing", "gemini": "https://console.cloud.google.com/billing"}
+                 "openai": "https://platform.openai.com/settings/organization/billing", "gemini": "https://console.cloud.google.com/billing",
+                 "vertex": "https://console.cloud.google.com/billing"}
+API_PAGES = {"gemini": "https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com",
+             "vertex": "https://console.cloud.google.com/apis/library/aiplatform.googleapis.com"}  # Google turns APIs on per project.
 RETRY = (429, 500, 502, 503, 529)  # Busy or briefly down: wait and ask again.
 SETUP = (401, 402, 403, 404)  # Key, billing or model name: asking again cannot help. A 400 fails only that request.
 TYPESAFE_CHECK = {"model": JEV_MODEL, "state": "Orion key check", "questions": {"ok": {
@@ -175,7 +182,7 @@ class Gemini(Provider):
         return {"x-goog-api-key": self.api_key}
 
     def request(self, system, prompt):
-        return f"/v1beta/models/{urllib.parse.quote(self.model, safe='')}:generateContent", {
+        return f"{self.models_path}/{urllib.parse.quote(self.model, safe='')}:generateContent", {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0, "maxOutputTokens": self.max_tokens}}
@@ -189,11 +196,18 @@ class Gemini(Provider):
         return "".join(part.get("text", "") for part in parts if not part.get("thought"))
 
 
-CLIENTS = {"anthropic": Anthropic, "openai": OpenAI, "gemini": Gemini}
+class Vertex(Gemini):
+    """Gemini on Vertex AI with a Google Cloud API key (usage billed to that Cloud project): the Gemini API's requests
+    at another address, with no project or region in it."""
+    provider, models_path = "vertex", "/v1beta1/publishers/google/models"
+
+
+CLIENTS = {"anthropic": Anthropic, "openai": OpenAI, "gemini": Gemini, "vertex": Vertex}
 
 
 def provider_for(model):
-    """The provider for a model name: an 'anthropic:', 'openai:' or 'gemini:' prefix wins, then the name's family."""
+    """The provider for a model name: an 'anthropic:', 'openai:', 'gemini:' or 'vertex:' prefix wins, then the name's
+    family (a bare gemini-* name is the Gemini API)."""
     name = str(model or "").strip()
     prefix, sep, _ = name.partition(":")
     if sep and prefix.lower() in PROVIDERS:
@@ -206,7 +220,7 @@ def provider_for(model):
     if lower.startswith("gemini-"):
         return "gemini"
     raise LLMSetupError(f"Cannot tell which provider serves the model {name!r}: use a claude-*, gpt-*, o3-style or "
-                        "gemini-* name, or put anthropic:, openai: or gemini: in front of it")
+                        "gemini-* name, or put anthropic:, openai:, gemini: or vertex: in front of it")
 
 
 def split_model(model):
@@ -225,7 +239,7 @@ def client_for(model, api_key=None, sleep=time.sleep, base=None):
 
 
 def default_model():
-    """The default model of the first provider with a key available: Anthropic, then OpenAI, then Gemini."""
+    """The default model of the first provider with a key available: Anthropic, OpenAI, Gemini, then Vertex AI."""
     for provider in PROVIDERS:
         if credentials.get(KEY_NAMES[provider]):
             return DEFAULT_MODELS[provider]
@@ -259,6 +273,8 @@ def explain(provider, model, error):
     """(ok, message) for a failed check, in words, with the page that fixes it. ok is None when the provider was
     only busy: the key may be fine, it just could not be checked now."""
     name, text = NAMES[provider], f"{error} {error.detail}".lower()
+    if provider in API_PAGES and "service_disabled" in text:
+        return False, f"The key's Google Cloud project has the {name} API turned off. Turn it on at {API_PAGES[provider]}, then check again"
     if error.status in (401, 403) or any(w in text for w in ("api key not valid", "api_key_invalid", "invalid x-api-key", "incorrect api key")):
         return False, f"{name} did not accept the key ({error.status or 'no answer'}). Create one at {KEY_PAGES[provider]}"
     if "free_tier" in text or "freetier" in text:

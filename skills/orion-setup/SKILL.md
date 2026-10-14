@@ -92,7 +92,7 @@ Add `[sequence]` after `paradigm-orion` only for GRU, TCN or transformer models 
 
 Then, from the app's folder (Orion refuses the home folder), run `orion init` and tell the person, in these words:
 "Orion's setup page has opened in your browser. Sign in to PostHog and choose this app's project, add an AI key
-(Anthropic, OpenAI or Gemini) for labelling, and optionally a TypeSafe key, then press Finish. The keys stay on your
+(Anthropic, OpenAI, Gemini or Vertex AI) for labelling, and optionally a TypeSafe key, then press Finish. The keys stay on your
 computer." It waits up to 20 minutes for Finish; if your shell stops commands sooner, run it in the background and
 wait for it to exit. Pass `--host https://eu.posthog.com` for PostHog's EU cloud when the app's code does not show it.
 If no browser can open (a remote machine), ask the person to run `orion init` in a terminal on their own computer.
