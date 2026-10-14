@@ -182,11 +182,11 @@ class SelfReportPipelineTests(unittest.TestCase):
         self.assertEqual(len(jev.requests), calls, "answers are cached")
 
         # Deploy copies the survey next to the model and names it in the snippet.
-        clf = self.orion.train(self.root / "recipe.yaml", rebuild=True, shuffles=0)
+        clf = self.orion.train(self.root / "recipe.yaml", rebuild=True, shuffles=0, pull=False)  # imported data: nothing to pull
         deployed = clf.deploy(out=self.root / "public")
         self.assertTrue((self.root / "public" / "checkout-sentiment-survey.json").exists())
         self.assertIn("selfReport: { survey: '/orion/checkout-sentiment-survey.json' }", deployed["snippet"])
-        self.assertIn("https://cdn.paradigmmachines.ai/orion@0.3.0/orion.js", deployed["snippet"])
+        self.assertIn("https://cdn.paradigmmachines.ai/orion@0.4.0/orion.js", deployed["snippet"])
 
     def test_without_a_typesafe_key_the_ai_labeller_ranks(self):
         class Ranker:

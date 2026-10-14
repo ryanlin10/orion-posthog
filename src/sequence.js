@@ -8,7 +8,7 @@ export const CHANNEL_FAMILY = { moves: 'pointer', path: 'pointer', peak_speed: '
   wheel: 'scroll', focus_changes: 'focus', gap: null, active: null };
 const KIND_FAMILY = { pointermove: 'pointer', pointerdown: 'pointer', pointerup: 'pointer', pointercancel: 'pointer', click: 'pointer',
   dblclick: 'pointer', contextmenu: 'pointer', keydown: 'keyboard', keyup: 'keyboard', wheel: 'scroll', scroll: 'scroll',
-  focusin: 'focus', focusout: 'focus' };
+  focusin: 'focus', focusout: 'focus', input: 'fills', visible: 'visibility' };
 
 /** The channels a recipe's telemetry families keep. */
 export const channelsFor = families => CHANNELS.filter(c => CHANNEL_FAMILY[c] === null || families.includes(CHANNEL_FAMILY[c]));

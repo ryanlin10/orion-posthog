@@ -134,6 +134,7 @@ class Store:
             if not isinstance(rid, str):
                 continue
             m = meta.setdefault(rid, {"recorder_id": rid, "sessions": [], "person_id": row.get("person_id"), "distinct_id": row.get("distinct_id"),
+                                      "device_id": p.get("$device_id"),
                                       "persons": [], "first_ts": row["timestamp"], "last_ts": row["timestamp"], "pages": [], "spans": [], "anchors": [],
                                       "time_origin_ms": p.get("time_origin_ms"), "batches": 0})
             m["batches"] += 1

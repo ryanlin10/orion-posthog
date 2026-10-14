@@ -60,6 +60,44 @@ try {
   assert.equal(rows.filter(r => r.kind === 'pointermove').length, movesBefore);
   assert.deepEqual(errors, []);
 
+  // Schema 1.4 in a real browser: a paste is recorded without its text, a press carries its control's box, and page
+  // scrolls carry the page's extent.
+  const signals = await browser.newPage();
+  await signals.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: url });
+  signals.on('pageerror', error => errors.push(error.message));
+  await signals.goto(`${url}/examples/sdk-test.html`);
+  await signals.evaluate(() => document.body.insertAdjacentHTML('beforeend', '<button id="go" style="margin:40px;width:120px;height:40px">Go</button><div style="height:4000px"></div>'));
+  await signals.addScriptTag({ type: 'module', content: `import { createRecorder } from '/src/index.js';
+    window.signalBatches = [];
+    window.signalRecorder = createRecorder({ capture: (name, props) => { signalBatches.push(props); return {}; }, get_session_id: () => 's', get_distinct_id: () => 'p' },
+      { recordFormat: 'rows' });` });
+  await signals.waitForFunction(() => window.signalRecorder);
+  await signals.evaluate(() => navigator.clipboard.writeText('pasted-secret'));
+  await signals.locator('input').focus();
+  await signals.keyboard.press('ControlOrMeta+V');
+  await signals.locator('#go').click();
+  await signals.mouse.wheel(0, 900); await signals.waitForTimeout(300);
+  await signals.evaluate(() => signalRecorder.flush());
+  const signalRows = await signals.evaluate(() => signalBatches.flatMap(b => b.records));
+  assert.equal(await signals.locator('input').inputValue(), 'pasted-secret', 'the paste did not happen');
+  const paste = signalRows.find(r => r.kind === 'input');
+  assert.deepEqual([paste?.via, paste?.field], ['paste', 'text'], 'paste not recorded');
+  assert.ok(!JSON.stringify(signalRows).includes('pasted-secret'));
+  const aimed = signalRows.find(r => r.kind === 'pointerdown');
+  assert.ok(aimed.box_w === 120 && aimed.box_h === 40 && aimed.x >= aimed.box_x && aimed.x <= aimed.box_x + aimed.box_w, 'press has no control box');
+  const scrolled = signalRows.filter(r => r.kind === 'scroll').at(-1);
+  assert.ok(scrolled?.content_height > 4000 && scrolled.view_height > 0 && scrolled.y > 0, 'page scroll has no extent');
+  assert.ok((await signals.evaluate(() => signalBatches.map(b => b.viewport.doc_height))).every(h => h > 4000), 'no page height');
+  // Headless pages never hide, so the visibility switch is simulated; the return travels with the next input.
+  const setHidden = hidden => signals.evaluate(h => { Object.defineProperty(document, 'hidden', { value: h, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange')); }, hidden);
+  await setHidden(true); await signals.waitForTimeout(400); await setHidden(false);
+  await signals.mouse.move(50, 50); await signals.mouse.move(60, 60);
+  await signals.evaluate(() => signalRecorder.flush());
+  const back = (await signals.evaluate(() => signalBatches.flatMap(b => b.records))).find(r => r.kind === 'visible');
+  assert.ok(back?.hidden_ms >= 350 && back.hidden_ms < 5000, `time hidden not recorded: ${JSON.stringify(back)}`);
+  await signals.close();
+
   // Real PostHog SDK, network intercepted locally: verify serialization and session enrichment.
   await page.goto(`${url}/examples/sdk-test.html`);
   const requests = [];
@@ -88,7 +126,7 @@ try {
   assert.ok(bursts.length > 0, 'SDK payload contains no recorder events');
   const sdkIdentity = await page.evaluate(() => ({ session: posthog.get_session_id(), person: posthog.get_distinct_id() }));
   assert.ok(bursts.every(b => b.$session_id === sdkIdentity.session && b.distinct_id === sdkIdentity.person));
-  assert.ok(bursts.every(b => b.schema_version === '1.3' && typeof b.time_origin_ms === 'number' && typeof b.clock.epoch_ms === 'number'));
+  assert.ok(bursts.every(b => b.schema_version === '1.4' && typeof b.time_origin_ms === 'number' && typeof b.clock.epoch_ms === 'number'));
   // Default timing mask: presses pair by opaque ID; no key code, key class or modifier leaves the page.
   const keys = bursts.flatMap(b => decodeRecords(b)).filter(r => r.kind.startsWith('key'));
   assert.deepEqual(keys.map(r => [r.kind, r.press_id]), [['keydown', 1], ['keyup', 1], ['keydown', 2], ['keyup', 2]]);
@@ -181,6 +219,38 @@ try {
   assert.deepEqual(labelEvent.properties.agents, ['support-agent']);
   assert.equal(labelEvent.properties.$session_id, live.session);
   await livePage.close();
+
+  // The base model ships inside orion.js: base: true scores real typing and pointer movement in the page.
+  const basePage = await browser.newPage(), baseBodies = [];
+  basePage.on('pageerror', error => errors.push(error.message));
+  await basePage.route('**/ingest/**', async route => {
+    baseBodies.push(route.request().postData() ?? '');
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"status":1}' });
+  });
+  await basePage.goto(`${url}/examples/sdk-test.html`);
+  await basePage.addScriptTag({ content: sdkScript });
+  await basePage.evaluate(async () => {
+    await new Promise(resolve => posthog.init('phc_local_test_only', { api_host: `${location.origin}/ingest`, persistence: 'memory', autocapture: false,
+      capture_pageview: false, capture_pageleave: false, disable_session_recording: true, advanced_disable_flags: true,
+      opt_out_useragent_filter: true, disable_compression: true, request_batching: false, loaded: resolve }));
+    window.orionOptions = { base: true, live: { every: 500, confirm: 1 } };
+  });
+  await basePage.addScriptTag({ url: `${url}/dist/orion.js` });
+  await basePage.waitForFunction(() => window.orion?.ready);
+  assert.deepEqual(await basePage.evaluate(() => orion.ready), ['orion-base']);
+  await basePage.locator('input').focus();
+  for (let i = 0; i < 6; i++) {
+    await basePage.mouse.move(100 + i * 40, 300, { steps: 25 });
+    await basePage.keyboard.type('orion ', { delay: 60 });
+    await basePage.mouse.move(500 - i * 30, 120, { steps: 25 });
+  }
+  await basePage.waitForFunction(() => orion.context('orion-base'), null, { timeout: 5000 });
+  const base = await basePage.evaluate(() => orion.context('orion-base'));
+  assert.ok(['neutral', 'negative'].includes(base.label) && base.confidence > 0 && base.confidence <= 1, JSON.stringify(base));
+  const baseEvents = () => baseBodies.map(decode).filter(b => b.includes('orion_label')).flatMap(transportEvents).filter(e => e.event === 'orion_label');
+  for (let i = 0; i < 30 && !baseEvents().length; i++) await basePage.waitForTimeout(100);
+  assert.equal(baseEvents().at(-1)?.properties.model, 'orion-base', 'No base-model label reached the SDK transport');
+  await basePage.close();
   assert.deepEqual(errors, []);
 
   // Self-report: the question appears while the page is in use, its answer reaches PostHog with the recorder and the
@@ -295,5 +365,5 @@ try {
     console.log(JSON.stringify({ crowdcast: 'passed', clock: trace.clock, preservedEvents: expected.length, syntheticFixture: true }));
   }
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ browser: await browser.version(), sdkVersion, checks: 'trusted input, pointer down/up, shadow password exclusion, real PostHog SDK payload and identity, script-tag auto-start, official snippet install, live labels from a served model, self-report question and mood reading, SDK rate-limit isolation, transport batching, private fixture isolation', status: 'passed' }));
+  console.log(JSON.stringify({ browser: await browser.version(), sdkVersion, checks: 'trusted input, pointer down/up, shadow password exclusion, value-free paste, control boxes, scroll extent, time hidden, real PostHog SDK payload and identity, script-tag auto-start, official snippet install, live labels from a served model, the shipped base model, self-report question and mood reading, SDK rate-limit isolation, transport batching, private fixture isolation', status: 'passed' }));
 } finally { await browser?.close(); await new Promise(resolve => server.close(resolve)); }

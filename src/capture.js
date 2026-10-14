@@ -1,9 +1,12 @@
 import { encodeRecords } from './codec.js';
-export const SCHEMA_VERSION = '1.3';
+export const SCHEMA_VERSION = '1.4';
 export const EVENT_NAME = 'orion_input';
 export const SESSION_EVENT = 'orion_session_start';
 export const MASKS = ['timing', 'types', 'off', 'code'];
 const PRIVATE = 'input[type="password"],[data-ph-behavior-ignore],[data-private],.ph-no-capture,.ph-sensitive';
+// What a press aims at, for its bounding box: the nearest control around the pressed node.
+const CONTROL = 'a,button,input,select,textarea,label,summary,[role="button"],[role="link"],[role="menuitem"],[role="option"],[role="tab"],[role="checkbox"],[role="radio"],[role="switch"]';
+const PASTES = new Set(['insertFromPaste', 'insertFromPasteAsQuotation', 'insertFromYank']);
 const instances = new WeakMap();
 // UTF-8 length of JSON text without allocating an encoded copy. JSON.stringify escapes lone surrogates.
 function utf8Length(text) {
@@ -54,6 +57,15 @@ export function fieldType(node) {
   if (node?.isContentEditable) return 'editable';
   return 'other';
 }
+// How a field changed without typing: 'paste', 'drop' or 'fill' (autofill, a picked suggestion). Typing, deleting
+// and undo return null, so these records never reveal keys the timing mask hides.
+export function fillVia(inputType, field) {
+  if (PASTES.has(inputType)) return 'paste';
+  if (inputType === 'insertFromDrop') return 'drop';
+  if (inputType === 'insertReplacementText') return 'fill';
+  if (!inputType && (field === 'text' || field === 'textarea' || field === 'editable')) return 'fill';
+  return null;
+}
 
 /** Capture actual browser samples only. No polling, interpolation or predicted events. */
 export function createRecorder(posthog, options = {}) {
@@ -76,6 +88,7 @@ export function createRecorder(posthog, options = {}) {
     isAllowed: options.isAllowed ?? (() => true),
     recordFormat: options.recordFormat ?? 'columns',
     focus: options.focus ?? true,
+    fills: options.fills ?? true,
     onRecord: options.onRecord ?? null,
     onReset: options.onReset ?? null,
     maxBytesPerMinute: options.maxBytesPerMinute ?? 0,
@@ -107,6 +120,8 @@ export function createRecorder(posthog, options = {}) {
   let stopped = false, paused = false, pendingBoundary = null;
   let generation = 0, nextPress = 1, minuteStart = win.performance.now(), minuteBytes = 0;
   const pressed = new Map();
+  // Returns to the page wait for the next permitted input, like boundaries, so a return alone sends nothing.
+  let hiddenAt = doc.hidden ? 0 : null, returns = [];
   function markGap(reason) { pendingBoundary = reason; pressed.clear(); }
 
   function permitted() {
@@ -127,6 +142,7 @@ export function createRecorder(posthog, options = {}) {
     if (stats.recorded) markGap('capture-gap');
     stats.dropped += records.length;
     records = []; recordBytes = 0; lastT = null; chunk = 0;
+    if (!permitted()) returns = []; // A new session or person keeps them: the return happened on this page.
     clearTimers();
     // Consumers of individual records (the live labeller) must forget input the recorder discarded.
     if (config.onReset) { try { config.onReset(); } catch { stats.errors++; } }
@@ -143,7 +159,8 @@ export function createRecorder(posthog, options = {}) {
       // Wall-clock anchor: timeOrigin + t can drift from Date.now(), which replay timestamps use.
       clock: { epoch_ms: Date.now(), perf_ms: win.performance.now() },
       ...(identity[0] !== null ? { $session_id: identity[0] } : {}),
-      viewport: { width: win.innerWidth, height: win.innerHeight, dpr: win.devicePixelRatio, scroll_x: win.scrollX, scroll_y: win.scrollY },
+      viewport: { width: win.innerWidth, height: win.innerHeight, dpr: win.devicePixelRatio, scroll_x: win.scrollX, scroll_y: win.scrollY,
+        doc_height: doc.documentElement?.scrollHeight },
       capture: { movement_source: source, coalesced_supported: typeof win.PointerEvent?.prototype.getCoalescedEvents === 'function', keyboard: config.keyboard, target_hz: 120, synthetic_allowed: config.allowSynthetic },
       quality: { record_count: records.length, dropped_before_batch: stats.dropped, excluded_events_total: stats.excluded, sdk_refused_batches: stats.refusedBatches },
       ...(config.recordFormat === 'columns' ? { record_columns: encodeRecords(records) } : { records }),
@@ -188,6 +205,7 @@ export function createRecorder(posthog, options = {}) {
       const reason = pendingBoundary; pendingBoundary = null;
       append({ kind: 'boundary', t, reason });
     }
+    for (const record of returns.splice(0)) append(record);
     return !stopped && !paused && generation === admittedGeneration;
   }
   function push(record) {
@@ -255,10 +273,13 @@ export function createRecorder(posthog, options = {}) {
     append(record);
   }
   function pointer(e, parent = e, target) {
-    return { ...base(parent, parent.type === source ? 'pointermove' : parent.type, target), t: timestamp(e), pointer_id: e.pointerId,
+    const record = { ...base(parent, parent.type === source ? 'pointermove' : parent.type, target), t: timestamp(e), pointer_id: e.pointerId,
       pointer_type: e.pointerType, x: finite(e.clientX), y: finite(e.clientY), page_x: finite(e.pageX), page_y: finite(e.pageY),
       dx: finite(e.movementX), dy: finite(e.movementY), button: e.button, buttons: e.buttons,
       pressure: finite(e.pressure), tilt_x: finite(e.tiltX), tilt_y: finite(e.tiltY), twist: finite(e.twist), modifiers: modifiers(parent) };
+    // Contact size: a finger's or pen's contact width and height in CSS pixels (a mouse always reports 1 × 1).
+    if (e.pointerType === 'touch' || e.pointerType === 'pen') { record.contact_w = finite(e.width, 1); record.contact_h = finite(e.height, 1); }
+    return record;
   }
   function movement(e) {
     // Use the coalesced list OR its parent. Including both duplicates the final sample.
@@ -273,21 +294,37 @@ export function createRecorder(posthog, options = {}) {
       append({ ...pointer(sample, e, target), coalesced });
     }
   }
+  function screened(e) {
+    if (!config.allowSynthetic && !e.isTrusted) return false;
+    if (privateTarget(e)) {
+      stats.excluded++;
+      if (stats.recorded) markGap('excluded');
+      return false;
+    }
+    return true;
+  }
   function listen(target, type, fn, filter = true) {
     const handler = e => {
       try {
-        if (stopped) return;
-        if (filter && (!config.allowSynthetic && !e.isTrusted)) return;
-        if (filter && privateTarget(e)) {
-          stats.excluded++;
-          if (stats.recorded) markGap('excluded');
-          return;
-        }
+        if (stopped || (filter && !screened(e))) return;
         fn(e);
       } catch { stats.errors++; }
     };
     target.addEventListener(type, handler, { capture: true, passive: true });
     listeners.push(() => target.removeEventListener(type, handler, true));
+  }
+  // Client-pixel box of the control a press lands on, so analysis can measure how far the pointer went past it.
+  function targetBox(e) {
+    const node = (e.composedPath?.() ?? []).find(n => n?.matches?.(CONTROL)) ?? e.target?.closest?.(CONTROL);
+    const r = node?.getBoundingClientRect?.();
+    if (!(r?.width > 0 && r?.height > 0)) return {};
+    return { box_x: Math.round(r.left), box_y: Math.round(r.top), box_w: Math.round(r.width), box_h: Math.round(r.height) };
+  }
+  // Scroll extent for the page, or for a scrolling area at least half the window tall, so depth can be a share.
+  function extent(e) {
+    const el = e.target === doc ? doc.scrollingElement ?? doc.documentElement : e.target;
+    const view = el?.clientHeight, content = el?.scrollHeight;
+    return view >= win.innerHeight / 2 && content > 0 ? { content_height: content, view_height: view } : {};
   }
   function boundary(reason) {
     pressed.clear();
@@ -299,16 +336,31 @@ export function createRecorder(posthog, options = {}) {
   }
   listen(doc, 'keydown', keyboard); listen(doc, 'keyup', keyboard);
   listen(doc, source, movement);
-  for (const type of ['pointerdown', 'pointerup', 'pointercancel', 'click', 'dblclick', 'contextmenu']) listen(doc, type, e => push(pointer(e)));
+  for (const type of ['pointerup', 'pointercancel', 'click', 'dblclick', 'contextmenu']) listen(doc, type, e => push(pointer(e)));
+  listen(doc, 'pointerdown', e => push({ ...pointer(e), ...targetBox(e) }));
   listen(doc, 'wheel', e => push({ ...base(e, 'wheel'), dx: e.deltaX, dy: e.deltaY, dz: e.deltaZ, mode: e.deltaMode }));
-  listen(doc, 'scroll', e => push({ ...base(e, 'scroll'), x: finite(e.target?.scrollLeft, win.scrollX), y: finite(e.target?.scrollTop, win.scrollY) }));
+  listen(doc, 'scroll', e => push({ ...base(e, 'scroll'), x: finite(e.target?.scrollLeft, win.scrollX), y: finite(e.target?.scrollTop, win.scrollY), ...extent(e) }));
   if (config.focus) {
     for (const type of ['focusin', 'focusout']) listen(doc, type, e => push({ ...base(e, type), field: fieldType(e.composedPath?.()[0] ?? e.target) }));
+  }
+  if (config.fills) {
+    // Value-free: only that a field changed without typing, and how. Typed changes are skipped before any check.
+    listen(doc, 'input', e => {
+      const field = fieldType(e.composedPath?.()[0] ?? e.target);
+      const via = fillVia(e.inputType, field);
+      if (via && screened(e)) push({ ...base(e, 'input'), field, via });
+    }, false);
   }
   listen(win, 'resize', e => push({ ...base(e, 'resize'), width: win.innerWidth, height: win.innerHeight, dpr: win.devicePixelRatio }));
   listen(win, 'blur', () => boundary('blur'), false);
   listen(win, 'pagehide', () => boundary('pagehide'), false);
-  listen(doc, 'visibilitychange', () => { if (doc.hidden) boundary('hidden'); }, false);
+  listen(doc, 'visibilitychange', () => {
+    const now = win.performance.now();
+    if (doc.hidden) { hiddenAt = now; boundary('hidden'); return; }
+    // Coming back: how long the page was hidden, recorded with the time it became visible again.
+    if (hiddenAt !== null && returns.length < 20) returns.push({ kind: 'visible', t: now, hidden_ms: now - hiddenAt });
+    hiddenAt = null;
+  }, false);
   const api = {
     flush,
     pause() { paused = true; discard(); },

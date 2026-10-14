@@ -32,7 +32,9 @@ def deploy(workspace, name, out_dir, version=None, context=None, url_prefix="/or
         (out_dir / onnx.name).write_bytes(onnx.read_bytes())
         extra.append(out_dir / onnx.name)
     url = f"{url_prefix.rstrip('/')}/{target.name}"
-    options = f"mask: 'timing', models: ['{url}']"
+    # The correction rate needs key classes, which only the types mask records.
+    mask = "types" if "corrections" in spec.get("features", {}).get("families", []) else "timing"
+    options = f"mask: '{mask}', models: ['{url}']"
     survey = workspace.path("surveys", f"{name}.json")
     if survey.exists():
         copied = out_dir / f"{name}-survey.json"

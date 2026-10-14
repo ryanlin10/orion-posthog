@@ -1,6 +1,68 @@
 # Changelog
 
-## Orion 0.3.0 (unreleased)
+## Orion 0.4.0 (unreleased)
+
+Input schema 1.4. The new records are on by default; the features that use them are opt-in recipe families, so
+existing recipes and deployed models are unchanged.
+
+- Field fills: an `input` record when a field changes without typing, with how (`paste`, `drop` or `fill` for
+  autofill) and the coarse field kind, never the value or its length. Typing, deleting and undo make no record, so
+  nothing leaks that the timing mask hides. `fills: false` turns it off. Family `fills`: `paste_count`, `autofill_count`.
+- Time away: a `visible` record when the page comes back, with `hidden_ms`; it travels with the next input like a
+  waiting boundary, so a return alone sends nothing. Family `visibility`: `hidden_count`, `hidden_ms`; recipes with it
+  keep windows in which the person left the tab (blur, hidden and pagehide no longer count as capture gaps there).
+- Scroll depth: page scrolls (and scrolling areas at least half the window tall) carry `content_height` and
+  `view_height`; batches carry `viewport.doc_height`. Family `depth`: `scroll_depth_max`, a share of the page.
+- Overshoot: a press on a link, button, field or button-like element carries that control's box (`box_x`, `box_y`,
+  `box_w`, `box_h`). Family `overshoot`: `overshoot_fraction` (presses where the pointer reached the control, left it
+  by 2 px or more and came back) and `overshoot_px_median`.
+- Correction rate: family `corrections`, `correction_rate` (deletes per key press). It needs `mask: 'types'`; the
+  builder also derives key classes from `code`. `orion deploy` prints `mask: 'types'` for such models and
+  `connect()` warns when the mask hides them.
+- Per-person baselines: `features: {baseline: true}` adds `<feature>_rel`, each window against the same browser's
+  earlier page loads (PostHog `$device_id`), for tree and logistic models. orion.js keeps the matching running means
+  in `localStorage` (`orion-baseline:<model>`, averages of window features only, written while capture is allowed), and
+  the builder computes the same means from pulled history; a parity test checks they agree.
+- Outcome labels from goal events the site already tracks: `labels.by: [outcome]` with
+  `labels.outcome: {events: {purchased: [order completed, /checkout/done]}, otherwise: left, within, skip, windows}`.
+  The first goal in a session labels the windows before it; `orion pull --recipe` pulls the goal events;
+  `orion label outcome`. Priority: self-report, human, outcome, text, replay.
+- The setup skill's first recipe uses the new families, lists the app's goal events for later, and leaves the mask
+  at timing.
+- Base model: `connect(posthog, { base: true })` runs a model that ships inside orion.js, so a site has a reading before
+  it trains its own: model `orion-base`, `neutral` or `negative`, from typing rhythm and pointer movement shape over the
+  last 10 seconds. Logistic regression trained on the public DUX dataset (46 people, a web form with frustration
+  triggers, observer-annotated emotion; CC BY 4.0, see NOTICE). On held-out people: AUC 0.69 (0.58 within the same form
+  step); it labels 10% of windows `negative` and is right 25% of the time against 13% by chance. It did not predict
+  self-reported mood in everyday computer use (Freihaut and Göritz field study, 174 people: AUC 0.50), and no model
+  trained on that study beat chance. docs/base-model.md has the comparison of architectures and data, and
+  `scripts/base_model.py` rebuilds it. `context()` prefers a site's own model, then the base model, then the mood
+  reading. The setup wizard and skill turn it on.
+- Research features: families `typing` (press-to-press, release-to-press and hold quartiles; pauses), `motion` (per
+  movement: directness, deviation, crossings, direction consistency, turning, speed profile, where the peak falls, late
+  against early speed, 100 ms jitter; read at most every 40 ms so sampling rates compare) and `touch` (contact area,
+  real pressure). `overshoot_px_sd`. Touch and pen samples record their contact size.
+- Models can carry a decision rule (`decision: {class, min_probability}`): a rare class wins from its own bar.
+- `orion train` is the whole loop in one command: it pulls what is new from PostHog, labels, builds, trains and checks.
+  The recipe is optional when `recipes/` holds one. `--deploy` also deploys, only when the model has validation
+  examples and beat shuffled labels (p at most 0.05), and exits 1 otherwise; `--json` prints one result object for
+  agents with progress on stderr; `--no-pull` trains on data already here. `Orion.train()` pulls too
+  (`pull=False` to skip), and `Classifier.deploy_check()` says why a model is not ready.
+- One shipped recipe, `recipes/site-feelings.yaml`, identical to the one the setup skill writes (a test keeps them
+  so): self-report, human and AI replay labels with a 0.6 confidence floor, logistic regression (it beats trees until
+  a few hundred labels), and windows that need 20 input records. Removed: `recipes/checkout-sentiment.yaml` (AI proxy
+  labels only, a pinned Anthropic model, a two-class target that wasted most answers to the question), the builder
+  examples `sentiment.json`, `multitask.json` (targets `orion train` cannot train) and `implicit.json` (one
+  `features.exclude` line), the reference trainer `examples/training/train_classifier.py` with `logistic.json` (a weaker
+  copy of `orion train`), and the synthetic `make_demo.py`, whose labels were unrelated to its input. Recipes are no
+  longer in the npm package.
+- Setup wizard: for the event check it offers to start the app (its dev script, or a local server for a plain-HTML
+  site), opens it and counts only that page's events, then stops it. One checklist adds the skills for the coding
+  agents in use. Closing the terminal mid-edit puts every file back. Claude Code and `uv` are found in `~/.local/bin`.
+  `npx github:ryanlin10/orion-posthog` no longer downloads the development dependencies (57 MB before, under 1 MB
+  now).
+
+## Orion 0.3.0
 
 Numbered after the recorder's 0.1.0 and 0.2.0 releases in this repository, which is now `ryanlin10/orion-posthog` (the old `posthog-behavioral-recorder` address redirects).
 
@@ -14,7 +76,6 @@ Numbered after the recorder's 0.1.0 and 0.2.0 releases in this repository, which
 - `orion pull` checks PostHog access before it creates any export, and in a terminal offers to sign in and carry on.
 - Orion finds `.orion/` in a parent folder (like git) and refuses to set up in the home folder or at the top of the disk.
 - The setup wizard's last step signs in to PostHog the same way and saves the sign-in for the training tools; it warns when the project chosen is not the one the app sends to.
-- Setup wizard: for the event check it offers to start the app (its dev script, or a local server for a plain-HTML site), opens it and counts only that page's events, then stops it. One checklist adds the skills for the coding agents in use. Closing the terminal mid-edit puts every file back. Claude Code and `uv` are found in `~/.local/bin`. `npx github:ryanlin10/orion-posthog` no longer downloads the development dependencies (57 MB before, under 1 MB now).
 - `orion search --cohort <name or id>`.
 - Sequence models read only the channels of the recipe's telemetry families (they used every channel before). Reports include the training and validation loss curve.
 - `orion deploy` writes to `public/orion` unless told otherwise and prints a snippet that loads `https://cdn.paradigmmachines.ai/orion@0.3.0/orion.js`.

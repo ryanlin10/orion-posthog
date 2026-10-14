@@ -59,11 +59,14 @@ def cmd_label(args):
             print(f"\nSaved {session.state()['done']} labels to {session.path}")
         return
     from .labels import save_labels
-    if args.labeller == "self_report":
-        from .labellers.self_report import label_self_report
-        labels, stats = label_self_report(o.store, recipe)
-        save_labels(o.workspace, recipe, "self_report", labels)
-        print(f"self-report labels: {json.dumps(stats)}")
+    if args.labeller in ("self_report", "outcome"):
+        if args.labeller == "self_report":
+            from .labellers.self_report import label_self_report as run
+        else:
+            from .labellers.outcome import label_outcome as run
+        labels, stats = run(o.store, recipe)
+        save_labels(o.workspace, recipe, args.labeller, labels)
+        print(f"{args.labeller.replace('_', '-')} labels: {json.dumps(stats)}")
         return
     llm = o.llm({**recipe, "labels": {**recipe["labels"], "by": ["model"]}})
     if args.labeller == "text":
@@ -80,8 +83,23 @@ def cmd_build(args):
 
 
 def cmd_train(args):
-    clf = Orion().train(args.recipe, args.arch, args.evaluate_test, rebuild=args.rebuild, shuffles=args.shuffles)
-    print(f"Model: {clf.path}")
+    # With --json, progress goes to stderr so stdout is one JSON object an agent can read.
+    o = Orion(log=(lambda *a: print(*a, file=sys.stderr)) if args.json else print)
+    clf = o.train(args.recipe, args.arch, args.evaluate_test, rebuild=args.rebuild, shuffles=args.shuffles, pull=args.pull)
+    problem = clf.deploy_check()
+    deployed = clf.deploy(out=args.out, url_prefix=args.url_prefix) if args.deploy and problem is None else None
+    if args.json:
+        print(json.dumps({"recipe": clf.name, "version": clf.version, "model": str(clf.path), "summary": clf.summary,
+                          "validation": clf.report["metrics"].get("validation"), "shuffled": clf.report.get("shuffled"),
+                          "label_sources": clf.report.get("label_sources"), "warnings": clf.report.get("warnings", []),
+                          "not_ready_because": problem, "deployed": deployed}, indent=2, default=str))
+    elif problem:
+        print(f"Model: {clf.path}\nNot ready to deploy: {problem}.")
+    elif deployed:
+        print(f"Deployed to {deployed['file']}. If the site does not load it yet, add after PostHog:\n\n{deployed['snippet']}")
+    else:
+        print(f"Model: {clf.path}\nReady to deploy: orion deploy {clf.name} (or train with --deploy).")
+    return 1 if args.deploy and deployed is None else 0
 
 
 def cmd_deploy(args):
@@ -163,13 +181,13 @@ def main(argv=None):
     s = sub.add_parser("pull", help="Export Orion telemetry and the events around it from PostHog")
     s.add_argument("--since", default="30d")
     s.add_argument("--events", type=lambda v: [x for x in v.split(",") if x], help="Extra event names, comma-separated")
-    s.add_argument("--recipe", help="Also pull the text event this recipe labels from")
+    s.add_argument("--recipe", help="Also pull the events this recipe labels from (its text event and goal events)")
     s.add_argument("--file", nargs="+", help="Import exported JSON Lines files instead of calling PostHog")
     s.add_argument("--text-event", action="append", help="With --file: event names whose text the text labeller reads")
     s.set_defaults(fn=cmd_pull)
 
-    s = sub.add_parser("label", help="Label windows: AI on text, AI on the replay, people on a local page, or visitors' own answers")
-    s.add_argument("labeller", choices=("text", "replay", "human", "self_report"))
+    s = sub.add_parser("label", help="Label windows: AI on text, AI on the replay, people on a local page, visitors' own answers, or goal events")
+    s.add_argument("labeller", choices=("text", "replay", "human", "self_report", "outcome"))
     s.add_argument("recipe")
     s.add_argument("--port", type=int, default=8795)
     s.add_argument("--limit", type=int, default=200, help="Human page: windows to offer")
@@ -182,11 +200,16 @@ def main(argv=None):
     s.add_argument("--relabel", action="store_true", help="Ask the AI labellers again")
     s.set_defaults(fn=cmd_build)
 
-    s = sub.add_parser("train", help="Build and train a classifier; saves a new model version")
-    s.add_argument("recipe", help="Recipe file or name")
+    s = sub.add_parser("train", help="Pull new data, label it, build, train and check a classifier: the whole loop in one command")
+    s.add_argument("recipe", nargs="?", help="Recipe file or name (default: the only recipe in recipes/)")
+    s.add_argument("--deploy", action="store_true", help="Also deploy the model if it passed its checks (exit code 1 if not)")
+    s.add_argument("--json", action="store_true", help="Print the result as JSON (progress goes to stderr)")
+    s.add_argument("--no-pull", dest="pull", action="store_false", help="Train on the data already pulled or imported")
+    s.add_argument("--out", default="public/orion", help="With --deploy: folder your site serves (default public/orion)")
+    s.add_argument("--url-prefix", default="/orion/", help="With --deploy: URL path where --out is served")
     s.add_argument("--arch", choices=("logistic", "random_forest", "boosted_trees", "gru", "tcn", "transformer"))
     s.add_argument("--evaluate-test", action="store_true", help="Also score the test split (do this once, after choosing a recipe)")
-    s.add_argument("--no-rebuild", dest="rebuild", action="store_false", help="Train on the latest dataset version as is")
+    s.add_argument("--no-rebuild", dest="rebuild", action="store_false", help="Train on the latest dataset version as is (no pull)")
     s.add_argument("--shuffles", type=int, help="Shuffled-label models to compare against (default 20; 3 for sequence models)")
     s.set_defaults(fn=cmd_train)
 

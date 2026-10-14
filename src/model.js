@@ -27,13 +27,20 @@ export function validateModel(spec) {
     if (typeof e.file !== 'string' || !Number.isInteger(e.steps) || !(e.step_ms > 0)) throw new TypeError('Sequence model is missing its ONNX file or step settings');
     return spec;
   }
-  const { names } = spec.features ?? {};
+  const { names, baseline } = spec.features ?? {};
+  if (baseline !== undefined && !['tile_ms', 'grace_ms', 'cap', 'min_tiles'].every(k => Number.isInteger(baseline?.[k]) && baseline[k] > 0)) {
+    throw new TypeError('Model has invalid baseline settings');
+  }
   const p = spec.preprocess ?? {};
   if (!Array.isArray(names) || !names.length) throw new TypeError('Model has no feature names');
   if (p.impute?.length !== names.length) throw new TypeError('Imputation does not match the features');
   const inputs = names.length + (p.indicators?.length ?? 0);
   if (p.mean?.length !== inputs || p.scale?.length !== inputs) throw new TypeError('Scaling does not match the features');
   if (!['linear', 'forest', 'boosted'].includes(spec.estimator?.kind)) throw new TypeError(`Unsupported estimator ${spec.estimator?.kind}`);
+  const d = spec.decision;
+  if (d !== undefined && !(spec.estimator.classes?.includes(d?.class) && d.min_probability > 0 && d.min_probability <= 1)) {
+    throw new TypeError('Model has an invalid decision rule');
+  }
   return spec;
 }
 
@@ -73,8 +80,12 @@ function interpret(spec, out) {
   if (spec.estimator.kind === 'forest') probs = out;
   else if (out.length === 1) { const p = sigmoid(out[0]); probs = [1 - p, p]; }
   else probs = softmax(out);
-  let best = 0;
-  for (let k = 1; k < probs.length; k++) if (probs[k] > probs[best]) best = k;
+  // A rare class can carry its own bar (spec.decision): it is the label once its probability reaches min_probability,
+  // otherwise the most likely other class is. Without one, the most likely class.
+  const flagged = spec.decision ? classes.indexOf(spec.decision.class) : -1;
+  let best = -1;
+  if (flagged >= 0 && probs[flagged] >= spec.decision.min_probability) best = flagged;
+  else for (let k = 0; k < probs.length; k++) if (k !== flagged && (best < 0 || probs[k] > probs[best])) best = k;
   return { label: classes[best], confidence: probs[best], probabilities: Object.fromEntries(classes.map((c, k) => [c, probs[k]])) };
 }
 
@@ -98,6 +109,9 @@ const NAMES = {
   click_hold_ms: ['click holds', 'ms'], click_interval_ms: ['time between clicks', 'ms'],
   scroll_interval_ms: ['time between scroll steps', 'ms'], focus_dwell_ms: ['time in each field', 'ms'],
   key_down_count: ['key presses', ''], pointer_path_px: ['pointer travel', 'px'], event_count: ['input events', ''], duration_ms: ['window length', 'ms'],
+  paste_count: ['pastes into fields', ''], autofill_count: ['autofilled fields', ''], hidden_count: ['times away from the page', ''],
+  hidden_ms: ['time away from the page', 'ms'], scroll_depth_max: ['scroll depth', '%'], overshoot_fraction: ['presses that overshot their target', '%'],
+  overshoot_px: ['distance past the target', 'px'], correction_rate: ['deletes per key press', '%'],
 };
 function describe(name) {
   const cv = name.endsWith('_cv');
@@ -125,7 +139,10 @@ export function evidence(spec, features, limit = 2) {
   }
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, limit).filter(s => Math.abs(s.z) >= 0.5).map(({ name, v, z }) => {
-    const [words, unit] = describe(name);
+    // A _rel feature is already a difference from this visitor's own usual value.
+    const own = name.endsWith('_rel');
+    const [words, unit] = describe(own ? name.slice(0, -4) : name);
+    if (own) return `${words} ${v > 0 ? 'higher' : 'lower'} than this visitor's usual (by ${fmt(Math.abs(v), unit)})`;
     return `${words} ${z > 0 ? 'higher' : 'lower'} than usual (${fmt(v, unit)} vs ${fmt(ref[name], unit)})`;
   });
 }

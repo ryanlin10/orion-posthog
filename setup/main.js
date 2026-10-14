@@ -22,7 +22,7 @@ import { findProject, HOSTS, projectInfo, SCOPES, waitForEvents } from './verify
 
 const REPO = 'ryanlin10/orion-posthog';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 const POSTHOG_KEY = 'POSTHOG_PERSONAL_API_KEY';
 const PYTHON_PACKAGE = `paradigm-orion @ git+https://github.com/${REPO}`;
 
@@ -161,11 +161,13 @@ async function setup(args, ui, env, fetch) {
     { value: 'types', label: 'Timing and key types', hint: 'adds letter, digit, space or delete; still never the key' },
     { value: 'off', label: 'Nothing from the keyboard', hint: 'pointer and scrolling only' }] });
   const flagged = args.mood || args['no-mood'] || args['self-report'];
-  const extras = flagged ? [!args['no-mood'] && 'mood', args['self-report'] && 'selfReport'].filter(Boolean)
-    : await ui.multiselect({ message: 'Live readings in the browser', initial: ['mood'], options: [
+  const extras = flagged ? [!args['no-mood'] && 'mood', !args['no-mood'] && 'base', args['self-report'] && 'selfReport'].filter(Boolean)
+    : await ui.multiselect({ message: 'Live readings in the browser', initial: ['mood', 'base'], options: [
       { value: 'mood', label: 'Mood reading', hint: 'angry, frustrated, calm, anxious, confused or pleased, from the pointer' },
+      { value: 'base', label: 'Base model', hint: 'signs of negative feeling from typing and movement; weak, trained on public data' },
       { value: 'selfReport', label: 'Ask visitors how it is going', hint: 'a small question in a corner, at most every 14 days' }] });
-  const options = { mask, ...(extras.includes('mood') && { mood: true }), ...(extras.includes('selfReport') && { selfReport: true }) };
+  const options = { mask, ...(extras.includes('mood') && { mood: true }), ...(extras.includes('base') && { base: true }),
+    ...(extras.includes('selfReport') && { selfReport: true }) };
 
   // Who makes the edit: Orion's agent on a key the developer has, a coding agent they are signed in to, or by hand.
   const coding = await findCodingAgents(env);

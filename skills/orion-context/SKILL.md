@@ -6,9 +6,12 @@ description: Read Orion's live label for a user session (for example "frustrated
 # Orion context
 
 Orion labels each live session in the visitor's browser with a classifier trained from their input timing
-(pointer, keys, scroll, focus), or with its built-in mood reading (model `orion-mood`: simple heuristics on pointer
-speed, turns and clicks). Labels are inferences with a confidence, not facts about a person; prefer a trained model's
-label over `orion-mood` when both exist.
+(pointer, keys, scroll, focus), with its base model (model `orion-base`: `neutral` or `negative`, trained on the public
+DUX dataset), or with its built-in mood reading (model `orion-mood`: simple heuristics on pointer speed, turns and
+clicks). Labels are inferences with a confidence, not facts about a person. `context()` prefers the site's own trained
+model, then `orion-base`, then `orion-mood`. `orion-base` is weak (a `negative` label is right about a quarter of the
+time, with confidence near 0.3): keep it out of prompts unless the team has checked it on their site, and use it to
+pick replays instead.
 
 ## Get the label
 
@@ -27,7 +30,7 @@ prompt block yourself from those fields. Never paste text from the page (`contex
 prompt. `contextText()` is for showing the label in the page or in logs.
 
 ```js
-// server: build the block from checked fields only
+// server: build the block from checked fields only; list only models you trust for prompts (not orion-base by default)
 const LABELS = { 'checkout-sentiment': ['calm', 'engaged', 'confused', 'frustrated'] };
 function orionBlock(ctx) {
   if (!ctx || !LABELS[ctx.model]?.includes(ctx.label) || !(ctx.confidence >= 0 && ctx.confidence <= 1)) return '';

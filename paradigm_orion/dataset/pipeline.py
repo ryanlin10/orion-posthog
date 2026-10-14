@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import re
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -10,13 +11,37 @@ from collections import Counter
 from contextlib import closing
 
 from . import __version__
+from .baseline import blocking, closed_tiles, merge, relative
 from .config import finite, recipe_config
 from .features import extract_features
 
 TELEMETRY_EVENTS = ("orion_input", "behavioral_burst")
-SCHEMAS = ("1.0", "1.1", "1.2", "1.3")
-KINDS = {"keydown", "keyup", "pointermove", "pointerdown", "pointerup", "pointercancel", "click", "dblclick", "contextmenu", "wheel", "scroll", "resize", "focusin", "focusout", "boundary"}
-NUMERIC_FIELDS = {"x", "y", "page_x", "page_y", "dx", "dy", "dz", "mode", "pressure", "tilt_x", "tilt_y", "twist", "width", "height", "dpr", "pointer_id", "button"}
+SCHEMAS = ("1.0", "1.1", "1.2", "1.3", "1.4")
+KINDS = {"keydown", "keyup", "pointermove", "pointerdown", "pointerup", "pointercancel", "click", "dblclick", "contextmenu", "wheel", "scroll", "resize",
+         "focusin", "focusout", "boundary", "input", "visible"}
+NUMERIC_FIELDS = {"x", "y", "page_x", "page_y", "dx", "dy", "dz", "mode", "pressure", "tilt_x", "tilt_y", "twist", "width", "height", "dpr", "pointer_id", "button",
+                  "hidden_ms", "content_height", "view_height", "box_x", "box_y", "box_w", "box_h", "contact_w", "contact_h"}
+KEY_TYPES = {"letter", "digit", "space", "delete", "enter", "modifier", "navigation", "other"}
+FILLS = {"paste", "drop", "fill"}
+
+
+def key_type(code):
+    """The key class of a physical key code, as src/capture.js keyType() assigns it."""
+    if re.fullmatch(r"Key[A-Z]", code):
+        return "letter"
+    if re.fullmatch(r"(Digit|Numpad)\d", code):
+        return "digit"
+    if code == "Space":
+        return "space"
+    if code in ("Backspace", "Delete"):
+        return "delete"
+    if code in ("Enter", "NumpadEnter"):
+        return "enter"
+    if re.search(r"Shift|Control|Alt|Meta|CapsLock", code):
+        return "modifier"
+    if re.match(r"Arrow|Home$|End$|Page", code):
+        return "navigation"
+    return "other"
 
 
 def dump(value):
@@ -87,6 +112,12 @@ def decode_records(batch):
             raise ValueError("Invalid key code")
         if "location" in row and (not isinstance(row["location"], int) or isinstance(row["location"], bool)):
             raise ValueError("Invalid key location")
+        if "key_type" in row and row["key_type"] not in KEY_TYPES:
+            raise ValueError("Invalid key class")
+        if row["kind"] == "input" and row.get("via") not in FILLS:
+            raise ValueError("Invalid field change")
+        if row["kind"] == "visible" and not (finite(row.get("hidden_ms")) and row["hidden_ms"] >= 0):
+            raise ValueError("Invalid time hidden")
         for key in ("trusted", "repeat", "composing", "coalesced"):
             if key in row and not isinstance(row[key], bool):
                 raise ValueError(f"Invalid {key}")
@@ -205,6 +236,12 @@ def normalize(db, counts):
                     if kind == "keyup":
                         held.pop(source, None)
                     clean["repeat"] = row.get("repeat", False)
+                    if "key_type" in row:
+                        clean["key_type"] = row["key_type"]
+                    elif row.get("code"):
+                        clean["key_type"] = key_type(row["code"])
+                if kind == "input":
+                    clean["via"] = row["via"]
                 if kind in ("pointerdown", "pointerup", "pointercancel"):
                     pointer = row.get("pointer_id", 0)
                     button = row.get("button", 0)
@@ -247,7 +284,7 @@ def read_labels(path, metadata, recipe):
         if not finite(a) or not finite(b) or a >= b:
             raise ValueError("Label requires finite start_ms < end_ms")
         source = label.get("source")
-        if not isinstance(source, str) or source not in {"human", "self_report", "model", "heuristic", "synthetic"}:
+        if not isinstance(source, str) or source not in {"human", "self_report", "outcome", "model", "heuristic", "synthetic"}:
             raise ValueError("Label requires a known source")
         identifier(label.get("version"), "label version")
         if not finite(label.get("confidence")) or not 0 <= label["confidence"] <= 1:
@@ -308,6 +345,25 @@ def load_hook(recipe, recipe_dir):
     return module.extract, fingerprint(path)
 
 
+def person_baselines(db, metadata, recipe):
+    """{recorder: running feature means from the same person's earlier page loads}, oldest page load first.
+    A recordings row names its person with baseline_key (the browser), else subject_id."""
+    config, families = recipe["features"]["baseline"], recipe["features"]["families"]
+    rules = {**recipe["quality"], "max_events": recipe["window"]["max_events"]}
+    order = []
+    for recorder, row in metadata.items():
+        first = db.execute("SELECT payload FROM batches WHERE recorder=? ORDER BY seq LIMIT 1", (recorder,)).fetchone()
+        if first:
+            order.append((str(row.get("baseline_key") or row.get("subject_id") or recorder), json.loads(first[0])["time_origin_ms"], recorder))
+    out, state = {}, {}
+    for person, _, recorder in sorted(order):
+        out[recorder] = stored = state.get(person, {})
+        events = [json.loads(payload) for (payload,) in db.execute("SELECT payload FROM events WHERE recorder=? ORDER BY t,ordinal", (recorder,))]
+        gaps = db.execute("SELECT start,end,reason FROM gaps WHERE recorder=?", (recorder,)).fetchall()
+        state[person] = merge(stored, closed_tiles(events, gaps, config, rules, families), config["cap"])
+    return out
+
+
 def build_dataset(recipe_path, batch_paths, labels_path, recordings_path, output):
     recipe_path, output = Path(recipe_path), Path(output)
     recipe = recipe_config(json.loads(recipe_path.read_text()))
@@ -355,6 +411,7 @@ def build_dataset(recipe_path, batch_paths, labels_path, recordings_path, output
             ingest(db, batch_paths, metadata, counts)
             normalize(db, counts)
             db.executescript("CREATE INDEX event_window ON events(recorder,t,ordinal); CREATE INDEX gap_window ON gaps(recorder,start,end);")
+            baselines = person_baselines(db, metadata, recipe) if recipe["features"]["baseline"] else None
             result_dir = root / "dataset"; result_dir.mkdir()
             files = {name: (result_dir / f"{name}.jsonl").open("w") for name in ("train", "validation", "test", "rejected")}
             feature_names = None
@@ -377,7 +434,7 @@ def build_dataset(recipe_path, batch_paths, labels_path, recordings_path, output
                             gaps = [r[0] for r in db.execute("SELECT DISTINCT reason FROM gaps WHERE recorder=? AND start<? AND end>=? ORDER BY reason", (recorder, b, a))]
                             if len(rows) > recipe["window"]["max_events"]: reason = "too-many-events"
                             elif sum(r["kind"] != "boundary" for r in events) < recipe["quality"]["min_events"]: reason = "too-few-events"
-                            elif gaps and not recipe["quality"]["allow_gaps"]: reason = "capture-gap"
+                            elif any(blocking(g, recipe["quality"]) for g in gaps): reason = "capture-gap"
                             elif any(r[1] for r in rows) and not recipe["quality"]["allow_synthetic"]: reason = "synthetic-input"
                             elif not all(r[2] for r in rows) and recipe["quality"]["require_quality_metadata"]: reason = "unknown-quality"
                         if reason:
@@ -386,6 +443,8 @@ def build_dataset(recipe_path, batch_paths, labels_path, recordings_path, output
                             continue
                         context = {"start_ms": a, "end_ms": b}
                         features, quality = extract_features(events, context, recipe["features"]["families"])
+                        if baselines is not None:
+                            features.update(relative(features, baselines.get(recorder, {}), recipe["features"]["baseline"]["min_tiles"]))
                         if hook:
                             # Hooks receive sanitized telemetry + window bounds, never labels or group IDs.
                             extra = hook(json.loads(dump(events)), dict(context))

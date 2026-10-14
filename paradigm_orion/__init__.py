@@ -3,15 +3,16 @@ for agents. Everything runs on your machine and in your visitors' browsers; noth
 
     from paradigm_orion import Orion
     orion = Orion(posthog_project="acme-web")
-    clf = orion.train("recipes/checkout-sentiment.yaml")
-    clf.deploy(out="public/orion", context=["support-agent"])
+    clf = orion.train("recipes/checkout-sentiment.yaml")   # pulls new data, labels, builds, trains and checks
+    if clf.deploy_check() is None:
+        clf.deploy(out="public/orion", context=["support-agent"])
     orion.context("<session id>")
     orion.search(label="frustrated", page="/checkout", cohort="Paying customers")
 """
 import json
 from pathlib import Path
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 
 class Classifier:
@@ -23,6 +24,18 @@ class Classifier:
     @property
     def summary(self):
         return self.report.get("summary", "")
+
+    def deploy_check(self):
+        """Why this model should not go live yet, or None once it has validation examples and beat shuffled labels."""
+        shuffled = self.report.get("shuffled") or {}
+        if not self.report.get("metrics", {}).get("validation", {}).get("examples"):
+            return "no validation examples; label more people first"
+        if not shuffled.get("rounds"):
+            return "no shuffled-label check ran"
+        if shuffled["p_value"] > 0.05:
+            reason = f"models trained on shuffled labels matched it in {shuffled['at_least_as_good']} of {shuffled['rounds']} tries (p = {shuffled['p_value']:.2f})"
+            return reason + ("; so few tries cannot reach p 0.05, so train with --shuffles 19" if shuffled["rounds"] < 19 else "")
+        return None
 
     def deploy(self, out="public/orion", context=None, url_prefix="/orion/"):
         from .deploy import deploy
@@ -57,10 +70,16 @@ class Orion:
             return None
         return make_client(recipe["labels"]["model"]["llm"], self.workspace, self._llm)
 
-    def recipe(self, recipe):
+    def recipe(self, recipe=None):
         from .recipe import load_recipe
         if isinstance(recipe, dict):
             return recipe
+        if recipe is None:
+            found = sorted(p for ext in ("yaml", "yml", "json") for p in Path("recipes").glob(f"*.{ext}"))
+            if len(found) != 1:
+                raise ValueError("No recipe in recipes/: write one (the orion-datasets skill shows how), or name one" if not found
+                                 else f"recipes/ has {len(found)} recipes ({', '.join(p.stem for p in found)}); name the one to use")
+            return load_recipe(found[0])
         path = Path(recipe)
         if path.exists():
             return load_recipe(path)
@@ -77,6 +96,9 @@ class Orion:
             r = self.recipe(recipe)
             if "text" in r["labels"]["model"]["reads"] and not r["labels"]["model"]["text"].get("file"):
                 text_events = (r["labels"]["model"]["text"]["event"],)
+            if r["labels"].get("outcome"):
+                from .labellers.outcome import goal_events
+                events = (*events, *goal_events(r))
         self.posthog.require_pull_access()  # Before any export exists: a missing scope stops here, with the fix.
         return self.store.pull(self.posthog, days(since, "since"), events, text_events, log=self.log)
 
@@ -90,9 +112,13 @@ class Orion:
             llm = None  # Saved AI labels need no key; the build says so if it has to ask for new ones.
         return build(self.store, r, llm, relabel, self.log)
 
-    def train(self, recipe, architecture=None, evaluate_test=False, rebuild=True, shuffles=None):
+    def train(self, recipe=None, architecture=None, evaluate_test=False, rebuild=True, shuffles=None, pull=True):
+        """The whole loop in one call: pull what is new from PostHog, label, build a dataset version, train, check and save
+        a model. pull=False trains on the data already here (imported files, offline)."""
         from .train import train
         r = self.recipe(recipe)
+        if pull and rebuild:
+            self.pull(f"{r['source']['since_days']}d", recipe=r)
         dataset = self.build(r)[0] if rebuild or not self.workspace.versions("datasets", r["name"]) else None
         path, report = train(self.workspace, r, dataset, architecture, evaluate_test, shuffles, self.log)
         return Classifier(self, path, report)
