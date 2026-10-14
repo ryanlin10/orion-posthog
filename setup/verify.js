@@ -17,7 +17,8 @@ async function call(fetch, url, key, body) {
     throw new PostHogError(`Could not reach PostHog (${error.cause?.code ?? error.message})`);
   }
   if (response.ok) return response.json();
-  const why = { 401: 'PostHog did not accept the key', 403: `The key needs the ${SCOPES} scopes` }[response.status] ?? `PostHog returned HTTP ${response.status}`;
+  const why = { 401: 'PostHog did not accept the credentials',
+    403: `PostHog denied access. Check the selected project and the ${SCOPES} permissions` }[response.status] ?? `PostHog returned HTTP ${response.status}`;
   throw new PostHogError(why, response.status);
 }
 
@@ -47,12 +48,13 @@ export async function projectInfo({ host, key, projectId, fetch = globalThis.fet
 }
 
 /** Orion events since `seconds` ago: { count, latest, browser, host }. */
-export async function orionEvents({ host, key, projectId, seconds, fetch = globalThis.fetch }) {
+export async function orionEvents({ host, key, projectId, seconds, siteHost, fetch = globalThis.fetch }) {
+  const source = siteHost ? ` and properties.$host = '${siteHost.replaceAll("'", "''")}'` : '';
   const query = `select count(), max(timestamp), argMax(properties.$browser, timestamp), argMax(properties.$host, timestamp)
-    from events where event in ('orion_session_start', 'orion_input') and timestamp > now() - interval ${Math.ceil(seconds)} second`;
+    from events where event in ('orion_session_start', 'orion_input') and timestamp > now() - interval ${Math.ceil(seconds)} second${source}`;
   const reply = await call(fetch, `${host}/api/projects/${projectId}/query/`, key, { query: { kind: 'HogQLQuery', query } });
-  const [count, latest, browser, siteHost] = reply.results?.[0] ?? [0];
-  return { count: Number(count) || 0, latest, browser, host: siteHost };
+  const [count, latest, browser, eventHost] = reply.results?.[0] ?? [0];
+  return { count: Number(count) || 0, latest, browser, host: eventHost };
 }
 
 /** Polls until events arrive (resolves with them), the signal aborts or `limit` ms pass (both resolve null). */

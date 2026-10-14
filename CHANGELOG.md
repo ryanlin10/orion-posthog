@@ -56,6 +56,11 @@ existing recipes and deployed models are unchanged.
   `features.exclude` line), the reference trainer `examples/training/train_classifier.py` with `logistic.json` (a weaker
   copy of `orion train`), and the synthetic `make_demo.py`, whose labels were unrelated to its input. Recipes are no
   longer in the npm package.
+- Setup wizard: for the event check it offers to start the app (its dev script, or a local server for a plain-HTML
+  site), opens it and counts only that page's events, then stops it. One checklist adds the skills for the coding
+  agents in use. Closing the terminal mid-edit puts every file back. Claude Code and `uv` are found in `~/.local/bin`.
+  `npx github:ryanlin10/orion-posthog` no longer downloads the development dependencies (57 MB before, under 1 MB
+  now).
 
 ## Orion 0.3.0
 

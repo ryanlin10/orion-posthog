@@ -110,17 +110,19 @@ main{max-width:420px;padding:32px 24px;margin:16px;border:1px solid #8884;border
 
 /**
  * Signs in through the browser and resolves with the sign-in: { host, project, ... }, saved when PostHog named the
- * project (with project null, choose one and saveLogin(record, env, id)). openUrl(url) shows PostHog's consent page.
+ * project (with project null, choose one and saveLogin(record, env, id)). openUrl(url) shows PostHog's consent page;
+ * onLink gets a short local address that leads there, for when no browser opens. Resolves null when `signal` aborts.
  */
-export async function signIn(host, { openUrl, fetch = globalThis.fetch, env = process.env, timeout = 600_000 } = {}) {
+export async function signIn(host, { openUrl, onLink = () => {}, signal, fetch = globalThis.fetch, env = process.env, timeout = 600_000 } = {}) {
   host = host.replace(/\/+$/, '');
   const verifier = randomBytes(48).toString('base64url'), state = randomBytes(24).toString('base64url');
   const challenge = createHash('sha256').update(verifier).digest('base64url');
-  let settle, redirect;
+  let settle, redirect, authorize;
   const done = new Promise((resolve, reject) => { settle = { resolve, reject }; });
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     const params = Object.fromEntries(url.searchParams);
+    if (url.pathname === '/' && authorize) { res.writeHead(302, { location: authorize }).end(); return; }
     if (url.pathname !== '/callback' || params.state !== state) { res.writeHead(url.pathname === '/callback' ? 400 : 404).end(); return; }
     const reply = (ok, title, message) => res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(page(ok, title, message));
     try {
@@ -136,11 +138,13 @@ export async function signIn(host, { openUrl, fetch = globalThis.fetch, env = pr
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   redirect = `http://127.0.0.1:${server.address().port}/callback`;
-  const url = `${host}/oauth/authorize/?${new URLSearchParams({ response_type: 'code', client_id: clientId(env), redirect_uri: redirect,
+  authorize = `${host}/oauth/authorize/?${new URLSearchParams({ response_type: 'code', client_id: clientId(env), redirect_uri: redirect,
     scope: SCOPES.join(' '), state, code_challenge: challenge, code_challenge_method: 'S256', required_access_level: 'project' })}`;
   const timer = setTimeout(() => settle.reject(new Error(`PostHog did not answer within ${Math.round(timeout / 60_000)} minutes`)), timeout);
+  signal?.addEventListener('abort', () => settle.resolve(null), { once: true });
   try {
-    openUrl(url);
+    onLink(`http://127.0.0.1:${server.address().port}/`);
+    openUrl(authorize);
     return await done;
   } finally {
     clearTimeout(timer);
