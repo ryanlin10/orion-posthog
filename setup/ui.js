@@ -27,9 +27,26 @@ export function createUI({ input = process.stdin, output = process.stdout, inter
     const room = width() - 4;
     return visible(text).length > room ? `${visible(text).slice(0, room - 1)}…` : text;
   };
+  // Long prose wraps onto more rail lines; a line with colours inside it (a diff, a menu) is cut instead.
+  const wrap = text => {
+    const room = width() - 4;
+    if (visible(text).length <= room) return [text];
+    const [, open, body, close] = String(text).match(/^((?:\x1b\[[0-9;]*m)*)(.*?)((?:\x1b\[[0-9;]*m)*)$/s);
+    if (ANSI.test(body)) return [fit(text)];
+    const lines = [];
+    let current = '';
+    for (const word of body.split(/(?<=\s)/)) {
+      if (current && (current + word).trimEnd().length > room) { lines.push(current.trimEnd()); current = ''; }
+      current += current || !/^\s+$/.test(word) ? word : '';
+      if (current.trimEnd().length > room) { lines.push(`${current.slice(0, room - 1)}…`); current = ''; }  // a path or a URL: cut
+    }
+    if (current.trim()) lines.push(current.trimEnd());
+    return lines.map(l => `${open}${l}${close}`);
+  };
   const rail = c.gray(S.bar);
   let active = null;  // the running spinner, if any
   const line = (text = '') => write(`${rail}${text ? `  ${text}` : ''}\n`);
+  const lines = text => wrap(text).forEach(l => line(l));
 
   function rows(text) {
     return text.replace(/\n$/, '').split('\n').reduce((n, l) => n + Math.max(1, Math.ceil(visible(l).length / width())), 0);
@@ -96,18 +113,19 @@ export function createUI({ input = process.stdin, output = process.stdout, inter
       for (const l of lines) write(`   ${l}\n`);
       write('\n');
     },
-    step(title, lines = []) {
+    /** A finished step; `cut` keeps each line to one row (diffs), otherwise long lines wrap. */
+    step(title, body = [], { cut = false } = {}) {
       write(`${rail}\n${c.green(S.done)}  ${title}\n`);
-      for (const l of lines) line(fit(l));
+      for (const l of body) cut ? line(fit(l)) : lines(l);
     },
-    note: lines => [].concat(lines).forEach(l => line(l)),
-    warn(text, lines = []) {
+    note: body => [].concat(body).forEach(lines),
+    warn(text, body = []) {
       write(`${rail}\n${c.yellow(S.warn)}  ${text}\n`);
-      for (const l of lines) line(c.dim(l));
+      for (const l of body) lines(c.dim(l));
     },
-    error(text, lines = []) {
+    error(text, body = []) {
       write(`${rail}\n${c.red(S.cancel)}  ${text}\n`);
-      for (const l of lines) line(c.dim(l));
+      for (const l of body) lines(c.dim(l));
     },
 
     async select({ message, options, initial }) {
@@ -180,7 +198,7 @@ export function createUI({ input = process.stdin, output = process.stdout, inter
           else if (k.ctrl && k.name === 'u') value = '';
           else if (str && !k.ctrl && !k.meta && /^[^\x00-\x1f\x7f]+$/.test(str)) value += str;
         },
-        summary: v => (secret ? (v ? 'Saved' : 'Skipped') : v || 'Skipped'),
+        summary: v => (secret ? (v ? 'Pasted (hidden)' : 'Skipped') : v || 'Skipped'),
       });
     },
 

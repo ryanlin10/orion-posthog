@@ -33,12 +33,12 @@
     "skills"
   ],
   "scripts": {
-    "build": "node scripts/build.js",
+    "bundle": "node scripts/build.js",
     "test": "node --test test/*.test.js",
     "test:browser": "node scripts/browser-test.js",
-    "check": "npm run build && npm test && npm run test:browser",
+    "check": "npm run bundle && npm test && npm run test:browser",
     "demo": "node scripts/serve.js",
-    "prepack": "npm run build",
+    "prepublishOnly": "npm run bundle",
     "test:training": ".venv/bin/python -m unittest discover -s test/training -v",
     "test:python": ".venv/bin/python -m unittest discover -s test/training -v",
     "setup": "node bin/orion-setup.js"

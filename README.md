@@ -36,7 +36,7 @@ says how weak.
 ## Train
 
 ```sh
-pip install "paradigm-orion[sequence] @ git+https://github.com/ryanlin10/orion-posthog"   # Python 3.11+
+uv tool install "paradigm-orion[sequence] @ git+https://github.com/ryanlin10/orion-posthog"   # or pipx install; Python 3.11+
 orion init      # sign in to PostHog in your browser and add an AI key; each is checked as you go
 orion check     # what works, and what fixes the rest
 orion train --deploy   # pull, label, build, train, check, and deploy if it beat shuffled labels

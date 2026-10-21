@@ -13,26 +13,48 @@ export const CODING_AGENTS = [
       '--allowedTools', 'Read,Edit,Write,Glob,Grep', '--disallowedTools', 'Bash,WebFetch,WebSearch',
       '--strict-mcp-config', '--no-session-persistence'],
     read: claudeEvent,
+    status: { args: ['auth', 'status'], signedIn: (code, out) => /"loggedIn"\s*:\s*true/.test(out) },
   },
   {
     id: 'codex', name: 'Codex', bin: 'codex',
     args: dir => ['exec', '--json', '--sandbox', 'workspace-write', '--skip-git-repo-check', '--ephemeral', '-C', dir, '-'],
     read: codexEvent,
+    status: { args: ['login', 'status'], signedIn: (code, out) => code === 0 && /logged in/i.test(out) && !/not logged in/i.test(out) },
   },
 ];
 
-/** The coding agents on PATH. */
-export async function findCodingAgents(env = process.env) {
-  const dirs = (env.PATH ?? '').split(path.delimiter).filter(Boolean);
+/** Prefer PATH; native Claude and uv installers also use ~/.local/bin, absent from some app-launched shells. */
+export async function onPath(bin, env = process.env) {
   const exts = process.platform === 'win32' ? ['.cmd', '.exe', ''] : [''];
-  const found = [];
-  for (const agent of CODING_AGENTS) {
-    for (const dir of dirs) {
-      const hit = await Promise.any(exts.map(ext => access(path.join(dir, agent.bin + ext), constants.X_OK).then(() => path.join(dir, agent.bin + ext)))).catch(() => null);
-      if (hit) { found.push({ ...agent, path: hit }); break; }
-    }
+  const dirs = (env.PATH ?? '').split(path.delimiter).filter(Boolean);
+  if (process.platform !== 'win32' && env.HOME) dirs.push(path.join(env.HOME, '.local', 'bin'));
+  for (const dir of new Set(dirs)) {
+    const hit = await Promise.any(exts.map(ext => access(path.join(dir, bin + ext), constants.X_OK).then(() => path.join(dir, bin + ext)))).catch(() => null);
+    if (hit) return hit;
   }
-  return found;
+  return null;
+}
+
+/** true, false, or null when the agent's own status command cannot tell within a few seconds. */
+function signedIn(agent, file, env) {
+  return new Promise(resolve => {
+    let out = '';
+    const child = spawn(file, agent.status.args, { env, stdio: ['ignore', 'pipe', 'pipe'], shell: process.platform === 'win32' });
+    const timer = setTimeout(() => { child.kill('SIGKILL'); resolve(null); }, 5000);
+    child.stdout.on('data', chunk => { out += chunk; });
+    child.stderr.on('data', chunk => { out += chunk; });
+    child.on('error', () => { clearTimeout(timer); resolve(null); });
+    child.on('close', code => { clearTimeout(timer); resolve(agent.status.signedIn(code, out)); });
+  });
+}
+
+/** The coding agents on PATH, each with signedIn true, false or null (unknown). */
+export async function findCodingAgents(env = process.env) {
+  const found = await Promise.all(CODING_AGENTS.map(async agent => {
+    const file = await onPath(agent.bin, env);
+    return file && { ...agent, path: file, signedIn: await signedIn(agent, file, env) };
+  }));
+  return found.filter(Boolean);
 }
 
 // Agents report absolute paths, sometimes through symlinks (/var is /private/var on macOS): show them project-relative.
@@ -84,11 +106,19 @@ export function codexEvent(event, root) {
   return {};
 }
 
+const running = new Set();
+
+/** Stops any coding agent still running, so nothing edits files while setup puts them back. */
+export function stopCodingAgents() {
+  for (const child of running) child.kill('SIGTERM');
+}
+
 /** Runs one coding agent on the brief, for at most `timeout` ms. Resolves { summary }; onStep gets progress lines. */
 export function runCodingAgent(agent, { root, brief, onStep = () => {}, timeout = 10 * 60_000, env = process.env }) {
   return new Promise((resolve, reject) => {
     const child = spawn(agent.path ?? agent.bin, agent.args(root), { cwd: root, env, stdio: ['pipe', 'pipe', 'pipe'],
       shell: process.platform === 'win32' });
+    running.add(child);
     let buffer = '', stderr = '', summary = '', error = null, settled = false;
     const finish = (fail, value) => {
       if (settled) return;
@@ -113,6 +143,7 @@ export function runCodingAgent(agent, { root, brief, onStep = () => {}, timeout 
     child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-4000); });
     child.on('error', fail => finish(new Error(`Could not start ${agent.name}: ${fail.message}`)));
     child.on('close', code => {
+      running.delete(child);
       if (buffer.trim()) handle(buffer);
       if (error) return finish(new Error(`${agent.name}: ${error}`));
       if (code !== 0) return finish(new Error(`${agent.name} exited with code ${code}${stderr.trim() ? `: ${stderr.trim().split('\n').slice(-3).join(' ')}` : ''}`));

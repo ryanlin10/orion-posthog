@@ -33,7 +33,7 @@ function describe(name, input) {
 }
 
 export async function runAgent({ provider, model, key, brief, workspace, ask, onStep = () => {}, maxTurns = 40, fetch, sleep, env }) {
-  const client = createClient({ provider, model, key, system: SYSTEM, prompt: brief, tools: TOOLS, fetch, sleep, env });
+  const client = createClient({ provider, model, key, system: SYSTEM, prompt: brief, tools: TOOLS, fetch, sleep, env, onRetry: onStep });
   const handlers = {
     list_files: workspace.list, read_file: workspace.read, search: workspace.search, edit_file: workspace.edit, create_file: workspace.create,
     ask_user: async ({ question, choices }) => (await ask(question, choices)) ?? 'No answer; pick the most sensible option and say which.',
