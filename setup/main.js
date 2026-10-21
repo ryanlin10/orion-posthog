@@ -35,7 +35,8 @@ Usage: npx github:${REPO} [options]
   --mood, --no-mood    The live mood reading (default: on)
   --self-report        Ask visitors how it is going
   --agent <name>       Who makes the edit: api, claude, codex or manual
-  --model <name>       The model for --agent api (default: ${DEFAULT_MODELS.anthropic}, ${DEFAULT_MODELS.openai} or ${DEFAULT_MODELS.gemini})
+  --model <name>       The model for --agent api (default: ${DEFAULT_MODELS.anthropic}, ${DEFAULT_MODELS.openai} or ${DEFAULT_MODELS.gemini};
+                       vertex:<model> runs Gemini on Vertex AI)
   --no-verify          Skip waiting for the first events
   -y, --yes            No questions: take the defaults (and keep the changes)
   -h, --help           This help
@@ -175,14 +176,16 @@ async function setup(args, ui, env, fetch) {
   const preferred = args.model ? providerFor(args.model)[0] : null;
   const keyed = (await Promise.all(PROVIDERS.filter(p => !preferred || p === preferred).map(async provider => {
     const found = await findKey(KEY_NAMES[provider], env);
-    return found && { provider, ...found, ok: (await checkKey(provider, found.value, { env, fetch })).ok };
+    if (!found) return null;
+    const check = await checkKey(provider, found.value, { env, fetch });
+    return { provider: check.provider ?? provider, ...found, ok: check.ok };
   }))).filter(Boolean);
   const key = keyed.find(k => k.ok) ?? null;
   const rejected = keyed.find(k => !k.ok);
   const editors = [
     { value: 'api', label: key ? `Orion's agent, with your ${NAMES[key.provider]} key` : 'Orion\'s agent, with an API key',
       hint: key ? `from ${tilde(key.from)}` : rejected ? `the saved ${NAMES[rejected.provider]} key was rejected; paste another`
-        : 'Anthropic, OpenAI or Gemini; kept on this machine for the training tools too' },
+        : 'Anthropic, OpenAI, Gemini or Vertex AI; kept on this machine for the training tools too' },
     ...coding.map(a => ({ value: a.id, label: a.name, hint: a.signedIn === false ? `installed but not signed in: run ${a.bin} once to sign in`
       : `already on this machine${a.signedIn ? ' and signed in' : ''}, so no key needed` })),
     { value: 'manual', label: 'Show me the code', hint: 'paste it in yourself' },
@@ -304,13 +307,14 @@ async function apiKey(ui, found, args, env) {
     ui.error(`No AI key found. Set ${Object.values(KEY_NAMES).join(', ')} or use --agent manual.`);
     return null;
   }
-  const provider = args.model ? providerFor(args.model)[0] : await ui.select({ message: 'Which AI?', options: PROVIDERS.map(p => ({ value: p, label: NAMES[p], hint: DEFAULT_MODELS[p] })) });
+  let provider = args.model ? providerFor(args.model)[0] : await ui.select({ message: 'Which AI?', options: PROVIDERS.map(p => ({ value: p, label: NAMES[p], hint: DEFAULT_MODELS[p] })) });
   for (;;) {
     const value = await ui.text({ message: `${NAMES[provider]} API key`, secret: true, placeholder: 'paste it here; it is hidden' });
     if (!value) return null;
     const check = await checkKey(provider, value, { env });
     ui.note(check.ok ? ui.c.green(check.message) : ui.c.yellow(check.message));
     if (!check.ok) continue;
+    provider = check.provider ?? provider;
     if (await ui.confirm({ message: `Keep the key for Orion's training tools in ${tilde(keysFile(env))}?`, yes: 'Keep it', no: 'Just this run' })) {
       await saveKeys({ [KEY_NAMES[provider]]: value }, env);
     }

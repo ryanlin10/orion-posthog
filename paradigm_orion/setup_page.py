@@ -149,7 +149,7 @@ class Setup:
             self.notes["ai"] = {"ok": None, "badge": "Skipped", "text": "No AI labeller for now; recipes can still use self-report and human labels."}
             return
         if provider not in PROVIDERS:
-            self.notes["ai"] = bad("Choose Anthropic, OpenAI or Gemini")
+            self.notes["ai"] = bad("Choose Anthropic, OpenAI, Gemini or Vertex AI")
             return
         model = (model or "").strip() or DEFAULT_MODELS[provider]
         if onboarding.provider_of(model) != provider and model.partition(":")[0].lower() not in PROVIDERS:
@@ -158,10 +158,13 @@ class Setup:
         if not key:
             self.notes["ai"] = bad(f"Paste a {NAMES[provider]} key. Get one at {KEY_PAGES[provider]}")
             return
+        chosen = {"provider": provider}
         try:
-            passed, message = verify(provider, key, split_model(model)[1])
+            passed, message = onboarding.check_labeller_key(key, split_model(model)[1], chosen)
         except ValueError as error:
             passed, message = False, str(error)
+        if chosen["provider"] != provider:  # The key works only on Google's other endpoint: that one from here on.
+            provider, model = chosen["provider"], onboarding.moved(model, chosen["provider"])
         self.notes["ai"] = note(passed, message + (". The key is saved; `orion check` checks it again later." if passed is None else ""))
         if passed is not False:
             if key != credentials.get(KEY_NAMES[provider]):

@@ -15,7 +15,7 @@ import { findKey, readKeys, saveKeys } from '../setup/keys.js';
 import { main } from '../setup/main.js';
 import { accessToken, authFile, loginFor, SCOPES as SIGN_IN_SCOPES, signIn } from '../setup/posthog-auth.js';
 import { detect, installCommand, posthogPlaces, vendorDir } from '../setup/project.js';
-import { createClient, providerFor } from '../setup/providers.js';
+import { checkKey, createClient, providerFor } from '../setup/providers.js';
 import { createUI } from '../setup/ui.js';
 import { findProject, orionEvents, waitForEvents } from '../setup/verify.js';
 import { localUrl, serveFolder, startDevServer } from '../setup/run-app.js';
@@ -193,12 +193,12 @@ function fakeProvider(provider) {
   return { fetch, requests };
 }
 
-for (const provider of ['anthropic', 'openai', 'gemini']) {
+for (const provider of ['anthropic', 'openai', 'gemini', 'vertex']) {
   test(`agent on ${provider}: tools run in the project and replies go back in the provider's own format`, async () => {
     const dir = await copyApp('vite-react');
     const { fetch, requests } = fakeProvider(provider);
     const steps = [];
-    const result = await runAgent({ provider, model: { anthropic: 'claude-opus-5-5', openai: 'gpt-5.6-sol', gemini: 'gemini-3.8-flash' }[provider],
+    const result = await runAgent({ provider, model: { anthropic: 'claude-opus-5-5', openai: 'gpt-5.6-sol', gemini: 'gemini-3.8-flash', vertex: 'gemini-3.8-flash' }[provider],
       key: 'test-key', brief: 'Add Orion', workspace: createWorkspace(dir), ask: async () => null, onStep: s => steps.push(s), fetch });
     assert.equal(result.summary, SCRIPT[2]);
     assert.equal(result.turns, 3);
@@ -227,7 +227,8 @@ for (const provider of ['anthropic', 'openai', 'gemini']) {
       assert.equal(second.input.at(-1).call_id, 'call_1_1');
       assert.equal(third.input.at(-1).output, 'Edited src/main.tsx');
     } else {
-      assert.match(requests[0].url, /\/v1beta\/models\/gemini-3\.8-flash:generateContent$/);
+      assert.equal(requests[0].url, provider === 'gemini' ? 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent'
+        : 'https://aiplatform.googleapis.com/v1beta1/publishers/google/models/gemini-3.8-flash:generateContent');
       assert.equal(requests[0].headers['x-goog-api-key'], 'test-key');
       assert.deepEqual(requests[0].body.generationConfig.thinkingConfig, { thinkingLevel: 'low' });
       assert.ok(!JSON.stringify(requests[0].body.tools).includes('additionalProperties'));
@@ -273,6 +274,32 @@ test('anthropic: a 400 about the fallback beta retries once without it; 401 is a
   assert.doesNotMatch(error.message, /sk-secret-value/, 'the key never shows in a message');
   assert.deepEqual(providerFor('openai:my-model'), ['openai', 'my-model']);
   assert.deepEqual(providerFor('gemini-3.8-flash'), ['gemini', 'gemini-3.8-flash']);
+  assert.deepEqual(providerFor('vertex:gemini-3.8-pro'), ['vertex', 'gemini-3.8-pro']);
+});
+
+test('key check: Vertex AI counts tokens, and a Google key one endpoint refuses moves to the other', async () => {
+  const seen = [];
+  const google = cloudKey => async (url, init) => {
+    seen.push({ url, method: init.method, body: init.body && JSON.parse(init.body) });
+    if (url.startsWith('https://generativelanguage.googleapis.com/')) return json({ error: { status: 'PERMISSION_DENIED' } }, 403);
+    return init.headers['x-goog-api-key'] === cloudKey ? json({ totalTokens: 3 }) : json({ error: { status: 'PERMISSION_DENIED' } }, 403);
+  };
+  assert.deepEqual(await checkKey('vertex', 'AQ.cloud', { fetch: google('AQ.cloud') }), { ok: true, message: 'Vertex AI accepted the key' });
+  assert.deepEqual(seen[0], { url: 'https://aiplatform.googleapis.com/v1beta1/publishers/google/models/gemini-3.8-flash:countTokens', method: 'POST',
+    body: { contents: [{ role: 'user', parts: [{ text: 'Orion key check' }] }] } });
+  const moved = await checkKey('gemini', 'AQ.cloud', { fetch: google('AQ.cloud') });
+  assert.equal(moved.ok, true);
+  assert.equal(moved.provider, 'vertex');
+  assert.deepEqual(await checkKey('gemini', 'AQ.dead', { fetch: google('AQ.cloud') }), { ok: false, message: 'Gemini did not accept the key (HTTP 403)' });
+  assert.equal((await checkKey('openai', 'sk', { fetch: async () => json({}, 401) })).provider, undefined);
+  // A key whose API restrictions leave out Vertex AI stays on the Gemini API, and the message says what to change.
+  const refuse = reason => json({ error: { status: 'PERMISSION_DENIED', details: [{ reason }] } }, 403);
+  const studio = async url => (url.startsWith('https://generativelanguage.googleapis.com/') ? json({ models: [] }) : refuse('API_KEY_SERVICE_BLOCKED'));
+  assert.deepEqual(await checkKey('vertex', 'AQ.studio', { fetch: studio }), { ok: true, provider: 'gemini', message: 'The Gemini API '
+    + 'accepted the key, so Orion will use it. Vertex AI refused it. The key\'s API restrictions leave out Vertex AI, so Google blocks it '
+    + 'there. Add aiplatform.googleapis.com to them at https://console.cloud.google.com/apis/credentials, then run setup again to move to Vertex AI' });
+  assert.deepEqual(await checkKey('vertex', 'AQ.off', { fetch: async () => refuse('SERVICE_DISABLED') }), { ok: false, message: 'The key\'s '
+    + 'Google Cloud project has the Vertex AI API turned off. Turn it on at https://console.cloud.google.com/apis/library/aiplatform.googleapis.com' });
 });
 
 test('coding agents: Claude Code and Codex events become progress lines and a summary', () => {

@@ -61,6 +61,12 @@ existing recipes and deployed models are unchanged.
   agents in use. Closing the terminal mid-edit puts every file back. Claude Code and `uv` are found in `~/.local/bin`.
   `npx github:ryanlin10/orion-posthog` no longer downloads the development dependencies (57 MB before, under 1 MB
   now).
+- Vertex AI: the AI labellers and the setup wizard's agent run Gemini on Vertex AI with a Google Cloud API key, billed
+  through Google Cloud (`vertex`, key `VERTEX_API_KEY`, models `vertex:<model>`). Google serves Gemini at
+  two endpoints and a key may be allowed on only one, so a key one refuses is tried on the other: a Google Cloud key
+  typed in for Gemini moves setup to Vertex AI, and a Gemini API key typed in for Vertex AI stays on the Gemini API.
+  When Google refuses a key because its project has the API turned off or the key's API restrictions leave it out,
+  setup says which, with the page that changes it.
 
 ## Orion 0.3.0
 

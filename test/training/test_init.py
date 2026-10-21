@@ -2,6 +2,7 @@
 terminal (browser sign-in to PostHog, or a personal API key whose scopes are checked) and on the setup page an agent
 opens, against local stand-ins for PostHog, OpenAI and TypeSafe; the no-questions mode; `orion check`; and the folder
 Orion works in (never the home folder; found from below like git)."""
+import argparse
 import contextlib
 import io
 import json
@@ -210,6 +211,37 @@ class InitTests(unittest.TestCase):
         self.assertEqual(self.saved_keys(), {"ANTHROPIC_API_KEY": "sk-ant-1"})
         self.assertEqual(len(ask_secret.prompts), 3)  # The key was typed once.
 
+    def test_a_google_cloud_key_given_for_gemini_switches_to_vertex_ai(self):
+        google = self.serve(google_key("AQ.cloud", "vertex", "gemini-3.8-flash", "gemini-3.8-pro"))
+        urls = {"ORION_GEMINI_URL": google.url, "ORION_VERTEX_URL": google.url}
+        code, printed, ask, _ = self.run_init(["--host", "http://127.0.0.1:9", "--project", "3"], asked=["k", "gemini", ""],
+                                              typed=["", "AQ.cloud", ""], **urls)
+        self.assertEqual(code, 0, printed)
+        self.assertIn("That is a Google Cloud key for Vertex AI, not the Gemini API. Vertex AI accepted it and gemini-3.8-flash "
+                      "answered, so Orion will run Gemini on Vertex AI.", printed)
+        self.assertEqual(ask.prompts[2], "Model [gemini-3.8-flash]: ")
+        self.assertEqual(json.loads(self.config.read_text())["llm_model"], "vertex:gemini-3.8-flash")
+        self.assertEqual(self.saved_keys(), {"VERTEX_API_KEY": "AQ.cloud"})
+        self.assertNotIn("AQ.cloud", printed)
+        # A model given with --llm moves to Vertex AI with the key.
+        code, printed, _, _ = self.run_init(["--host", "http://127.0.0.1:9", "--project", "3", "--llm", "gemini-3.8-pro"],
+                                            asked=["k"], typed=["", "AQ.cloud", ""], **urls)
+        self.assertEqual((code, json.loads(self.config.read_text())["llm_model"]), (0, "vertex:gemini-3.8-pro"))
+
+    def test_a_gemini_api_key_given_for_vertex_ai_stays_on_the_gemini_api(self):
+        google = self.serve(google_key("AQ.studio", "gemini", "gemini-3.8-flash"))
+        code, printed, ask, _ = self.run_init(["--host", "http://127.0.0.1:9", "--project", "3"], asked=["k", "vertex", ""],
+                                              typed=["", "AQ.studio", ""], ORION_GEMINI_URL=google.url, ORION_VERTEX_URL=google.url)
+        self.assertEqual(code, 0, printed)
+        self.assertIn("The Gemini API accepted the key and gemini-3.8-flash answered, so Orion will use the Gemini API. Vertex AI "
+                      "refused it. The key's API restrictions leave out Vertex AI, so Google blocks it there. Add "
+                      "aiplatform.googleapis.com to them at https://console.cloud.google.com/apis/credentials, then run `orion init` "
+                      "again to move to Vertex AI.", printed)
+        self.assertEqual(ask.prompts[2], "Model [vertex:gemini-3.8-flash]: ")
+        self.assertEqual(json.loads(self.config.read_text())["llm_model"], "gemini-3.8-flash")
+        self.assertEqual(self.saved_keys(), {"GEMINI_API_KEY": "AQ.studio"})
+        self.assertNotIn("AQ.studio", printed)
+
     def test_saved_keys_are_kept_with_enter(self):
         self.keys.parent.mkdir()
         self.keys.write_text("POSTHOG_PERSONAL_API_KEY=phx_saved\nANTHROPIC_API_KEY=sk-ant-saved\n")
@@ -262,6 +294,16 @@ class InitTests(unittest.TestCase):
         self.assertEqual(onboarding.detect_host(self.root), "https://eu.posthog.com")
         (self.root / "src" / "analytics.ts").unlink()
         self.assertIsNone(onboarding.detect_host(self.root))
+
+
+def google_key(key, allowed, *models):
+    """Routes for a Google key whose API restrictions allow only one of Google's endpoints: "vertex" or "gemini"."""
+    paths = {"gemini": "/v1beta/models", "vertex": "/v1beta1/publishers/google/models"}
+    blocked = (403, {"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "Requests to this API are blocked.",
+                               "details": [{"reason": "API_KEY_SERVICE_BLOCKED"}]}})
+    answer = {"candidates": [{"content": {"role": "model", "parts": [{"text": "OK"}]}}]}
+    return {("POST", f"{path}/{m}:generateContent"): [keyed("x-goog-api-key", key, answer) if provider == allowed else blocked]
+            for provider, path in paths.items() for m in models}
 
 
 class SetupPageTests(unittest.TestCase):
@@ -323,6 +365,19 @@ class SetupPageTests(unittest.TestCase):
         self.assertIn("AI labeller: ok", printed)
         for secret in ("sk-good", "sk-wrong", "pha_", "phr_"):
             self.assertNotIn(secret, printed)
+
+    def test_the_page_moves_a_google_cloud_key_given_for_gemini_to_vertex_ai(self):
+        google = FakeAPI(google_key("AQ.cloud", "vertex", "gemini-3.8-flash"))
+        self.addCleanup(google.close)
+        args = argparse.Namespace(host="http://127.0.0.1:9", project=None, llm=None, ui_host=None)
+        with isolated_env(self.root, ORION_HOME=str(self.root / ".orion"), ORION_GEMINI_URL=google.url, ORION_VERTEX_URL=google.url):
+            page = setup_page.Setup(Workspace(), args, 0)
+            page.ai("gemini", "", "AQ.cloud")
+            keys = credentials.read()
+        self.assertEqual(page.notes["ai"]["ok"], True)
+        self.assertIn("Vertex AI accepted it and gemini-3.8-flash answered", page.notes["ai"]["text"])
+        self.assertEqual((page.model, json.loads(self.config.read_text())["llm_model"]), ("vertex:gemini-3.8-flash", "vertex:gemini-3.8-flash"))
+        self.assertEqual(keys, {"VERTEX_API_KEY": "AQ.cloud"})
 
 
 class FolderTests(unittest.TestCase):

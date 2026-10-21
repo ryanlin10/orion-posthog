@@ -166,7 +166,7 @@ def main(argv=None):
     s.add_argument("--host", help="PostHog app host, e.g. https://us.posthog.com or https://eu.posthog.com")
     s.add_argument("--project", help="PostHog project id")
     s.add_argument("--ui-host", help="Host for replay links if it differs from --host")
-    s.add_argument("--llm", help="AI labeller: a provider (anthropic, openai, gemini) or a model, e.g. gpt-5.6-sol")
+    s.add_argument("--llm", help="AI labeller: a provider (anthropic, openai, gemini, vertex) or a model, e.g. gpt-5.6-sol")
     s.add_argument("--no-input", action="store_true", help="Ask nothing; save the flags as given")
     s.add_argument("--no-check", action="store_true", help="Do not check the keys with PostHog or the AI provider")
     how = s.add_mutually_exclusive_group()

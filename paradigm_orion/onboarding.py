@@ -262,24 +262,42 @@ def setup_labeller(ws, args):
         print("  No AI labeller for now; recipes can still use human and self-report labels.")
         return
     model = fixed if fixed and fixed.lower() not in PROVIDERS else ask_model(provider, saved)
-    name = KEY_NAMES[provider]
-    if not credentials.get(name):
+    if not credentials.get(KEY_NAMES[provider]):
         print(f"Get a {NAMES[provider]} key at {KEY_PAGES[provider]}")
-    check = None if args.no_check else (lambda key: verify(provider, key, split_model(model)[1]))
-    key = take_key(f"{NAMES[provider]} API key", name, check)
+    chosen = {"provider": provider}
+    check = None if args.no_check else (lambda key: check_labeller_key(key, split_model(model)[1], chosen))
+    key = take_key(f"{NAMES[provider]} API key", KEY_NAMES[provider], check)
+    if chosen["provider"] != provider:  # The key works only on Google's other endpoint: that one from here on.
+        provider, key, model = chosen["provider"], chosen["key"], moved(model, chosen["provider"])
     save_settings(ws, llm_model=model)
-    save_keys({name: key})
+    save_keys({KEY_NAMES[provider]: key})
+
+
+def check_labeller_key(key, model, chosen):
+    """verify, plus a second try on Google's other endpoint for a key the chosen one refuses: Google Cloud keys are
+    often allowed only on Vertex AI, AI Studio keys only on the Gemini API. When the other takes the key, chosen
+    switches to it and keeps the key."""
+    ok, message = verify(chosen["provider"], key, model)
+    other = {"gemini": "vertex", "vertex": "gemini"}.get(chosen["provider"])
+    if ok is not False or not other or not verify(other, key, model)[0]:
+        return ok, message
+    chosen.update(provider=other, key=key)
+    if other == "vertex":
+        return True, (f"That is a Google Cloud key for Vertex AI, not the Gemini API. Vertex AI accepted it and {model} answered, "
+                      "so Orion will run Gemini on Vertex AI.")
+    return True, (f"The Gemini API accepted the key and {model} answered, so Orion will use the Gemini API. Vertex AI refused it. "
+                  f"{message}, then run `orion init` again to move to Vertex AI.")
 
 
 def choose_provider(saved):
     default = provider_of(saved) or next((p for p in PROVIDERS if credentials.get(KEY_NAMES[p])), PROVIDERS[0])
     while True:
-        answer = ask_default("AI labeller: anthropic, openai, gemini or skip", default).lower()
+        answer = ask_default("AI labeller: anthropic, openai, gemini, vertex (Gemini on Google Cloud) or skip", default).lower()
         if answer in PROVIDERS:
             return answer
         if answer == "skip":
             return None
-        print("  Type anthropic, openai, gemini or skip.")
+        print("  Type anthropic, openai, gemini, vertex or skip.")
 
 
 def ask_model(provider, saved):
@@ -288,6 +306,12 @@ def ask_model(provider, saved):
     if provider_of(name) == provider or name.partition(":")[0].lower() in PROVIDERS:
         return name
     return f"{provider}:{name}"
+
+
+def moved(model, provider):
+    """The model's name on another provider: bare when the name shows that provider (gemini-*), else provider:name."""
+    name = split_model(model)[1]
+    return name if provider_of(name) == provider else f"{provider}:{name}"
 
 
 def provider_of(model):

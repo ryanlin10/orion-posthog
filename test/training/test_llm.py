@@ -1,4 +1,4 @@
-"""The AI labellers' model clients against local stand-ins for the Anthropic, OpenAI, Gemini and TypeSafe APIs:
+"""The AI labellers' model clients against local stand-ins for the Anthropic, OpenAI, Gemini, Vertex AI and TypeSafe APIs:
 request shapes, text extraction, the retry policy, setup errors, key checks and which model make_client picks."""
 import json
 import os
@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 from fakes import ScriptedModel
 from paradigm_orion import credentials
 from paradigm_orion.llm import (BILLING_PAGES, KEY_PAGES, NAMES, TYPESAFE_CHECK, Anthropic, Cached, Gemini, LLMError, LLMSetupError,
-                                OpenAI, make_client, provider_for, split_model, verify, verify_typesafe)
+                                OpenAI, Vertex, make_client, provider_for, split_model, verify, verify_typesafe)
 from paradigm_orion.workspace import Workspace
 
 
@@ -128,6 +128,17 @@ class ProviderTests(unittest.TestCase):
                                         "contents": [{"role": "user", "parts": [{"text": "prompt"}]}],
                                         "generationConfig": {"temperature": 0, "maxOutputTokens": 8192}})
 
+    def test_vertex_sends_the_gemini_request_to_vertex_ai_with_the_key_alone(self):
+        reply = {"candidates": [{"content": {"role": "model", "parts": [{"text": "[\"calm\"]"}]}}]}
+        fake = self.serve({("POST", "/v1beta1/publishers/google/models/gemini-test:generateContent"): [(200, reply)]})
+        self.assertEqual(Vertex("gemini-test", "AQ.test", base=fake.url).complete("sys", "prompt"), '["calm"]')
+        sent = fake.requests[-1]
+        self.assertEqual(sent["headers"]["x-goog-api-key"], "AQ.test")
+        self.assertEqual(sent["body"], {"systemInstruction": {"parts": [{"text": "sys"}]},
+                                        "contents": [{"role": "user", "parts": [{"text": "prompt"}]}],
+                                        "generationConfig": {"temperature": 0, "maxOutputTokens": 8192}})
+        self.assertEqual(Vertex("gemini-test", "k").base, "https://aiplatform.googleapis.com")
+
     def test_gemini_blocked_prompt_is_an_error(self):
         fake = self.serve({("POST", "/v1beta/models/gemini-test:generateContent"): [(200, {"promptFeedback": {"blockReason": "SAFETY"}})]})
         with self.assertRaisesRegex(LLMError, "SAFETY"):
@@ -183,6 +194,8 @@ class ProviderTests(unittest.TestCase):
         checks = {"anthropic": ("claude-x", "/v1/messages", "x-api-key", lambda k: k, lambda b: b["max_tokens"], 1),
                   "openai": ("gpt-x", "/v1/responses", "authorization", lambda k: f"Bearer {k}", lambda b: b["max_output_tokens"], 16),
                   "gemini": ("gemini-x", "/v1beta/models/gemini-x:generateContent", "x-goog-api-key", lambda k: k,
+                             lambda b: b["generationConfig"]["maxOutputTokens"], 64),
+                  "vertex": ("gemini-x", "/v1beta1/publishers/google/models/gemini-x:generateContent", "x-goog-api-key", lambda k: k,
                              lambda b: b["generationConfig"]["maxOutputTokens"], 64)}
         for provider, (model, path, header, value, budget, tokens) in checks.items():
             fake = self.serve({("POST", path): [keyed(header, "good-key", {"anything": "goes"}, value=value)]})
@@ -204,10 +217,23 @@ class ProviderTests(unittest.TestCase):
                  ("gemini", "/v1beta/models/gemini-x:generateContent", (400, {"error": {"message": "API key not valid. Please pass a valid API key."}}),
                   f"Gemini did not accept the key (400). Create one at {KEY_PAGES['gemini']}"),
                  ("anthropic", "/v1/messages", (404, {"error": {"message": "model: claude-x"}}),
-                  "Anthropic accepted the key, but the model claude-x is not available to it. Choose claude-sonnet-5-5 or another model the key can use")]
+                  "Anthropic accepted the key, but the model claude-x is not available to it. Choose claude-sonnet-5-5 or another model the key can use"),
+                 # Google turns each API on per Cloud project; the key is fine, the project needs the API.
+                 ("vertex", "/v1beta1/publishers/google/models/gemini-x:generateContent",
+                  (403, {"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "Agent Platform API has not been used in project 1 "
+                         "before or it is disabled.", "details": [{"reason": "SERVICE_DISABLED", "domain": "googleapis.com"}]}}),
+                  "The key's Google Cloud project has the Vertex AI API turned off. Turn it on at "
+                  "https://console.cloud.google.com/apis/library/aiplatform.googleapis.com, then check again"),
+                 # A key's own API restrictions can leave the API out even when the project has it on.
+                 ("vertex", "/v1beta1/publishers/google/models/gemini-x:generateContent",
+                  (403, {"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "Requests to this API aiplatform.googleapis.com "
+                         "method google.cloud.aiplatform.v1beta1.PredictionService.GenerateContent are blocked.",
+                         "details": [{"reason": "API_KEY_SERVICE_BLOCKED", "domain": "googleapis.com"}]}}),
+                  "The key's API restrictions leave out Vertex AI, so Google blocks it there. Add aiplatform.googleapis.com to them "
+                  "at https://console.cloud.google.com/apis/credentials")]
         for provider, path, answer, expected in cases:
             fake = self.serve({("POST", path): [answer]})
-            model = {"anthropic": "claude-x", "openai": "gpt-x", "gemini": "gemini-x"}[provider]
+            model = {"anthropic": "claude-x", "openai": "gpt-x", "gemini": "gemini-x", "vertex": "gemini-x"}[provider]
             self.assertEqual(verify(provider, "k-123456789012", model, base=fake.url, sleep=self.sleeps.append), (False, expected))
         # Gemini's free tier runs out after a few requests a day; the part that says so comes late in the reply.
         long = "You exceeded your current quota, please check your plan and billing details. " + "x" * 400 + \
@@ -243,20 +269,24 @@ class ModelChoiceTests(unittest.TestCase):
     def test_provider_for_reads_prefixes_then_families(self):
         cases = {"claude-sonnet-5-5": "anthropic", "gpt-5.6-sol": "openai", "chatgpt-4o-latest": "openai", "o3": "openai",
                  "o4-mini": "openai", "gemini-3.8-flash": "gemini", "openai:my-fine-tune": "openai", "Gemini:custom": "gemini",
-                 "anthropic:gpt-lookalike": "anthropic"}
+                 "anthropic:gpt-lookalike": "anthropic", "vertex:gemini-3.8-pro": "vertex", "Vertex:custom": "vertex"}
         for model, provider in cases.items():
             self.assertEqual(provider_for(model), provider, model)
         for bad in ("llama-3", "omni", "", None, "mistral:large"):
-            with self.assertRaisesRegex(LLMSetupError, "anthropic:, openai: or gemini:"):
+            with self.assertRaisesRegex(LLMSetupError, "anthropic:, openai:, gemini: or vertex:"):
                 provider_for(bad)
         self.assertEqual(split_model("openai:gpt-5.6-sol"), ("openai", "gpt-5.6-sol"))
         self.assertEqual(split_model("openai:ft:gpt-4o:acme"), ("openai", "ft:gpt-4o:acme"))
+        self.assertEqual(split_model("vertex:gemini-3.8-pro"), ("vertex", "gemini-3.8-pro"))
         with self.assertRaises(LLMSetupError):
             split_model("gemini:")
 
     def test_make_client_takes_the_recipe_then_the_saved_model_then_the_first_saved_key(self):
         with self.assertRaisesRegex(LLMSetupError, "Run `orion init` to choose an AI labeller and save its key"):
             make_client(None, self.ws)
+        credentials.save({"VERTEX_API_KEY": "AQ.file"})
+        client = make_client(None, self.ws)
+        self.assertEqual((type(client.client), client.model, client.client.api_key), (Vertex, "gemini-3.8-flash", "AQ.file"))
         credentials.save({"GEMINI_API_KEY": "AIza-file"})
         client = make_client(None, self.ws)
         self.assertIsInstance(client, Cached)
